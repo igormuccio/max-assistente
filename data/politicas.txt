@@ -1,0 +1,37 @@
+Empresa: XYZ Entregas
+Fundada em: 2015, São Paulo - SP
+CNPJ: 12.345.678/0001-99
+
+Prazos de entrega:
+- Região Sudeste: 2 a 3 dias úteis
+- Região Sul: 3 a 4 dias úteis
+- Região Nordeste: 5 a 7 dias úteis
+- Região Norte e Centro-Oeste: 7 a 10 dias úteis
+
+Política de reembolso:
+- Prazo para solicitação: até 7 dias após a entrega
+- Reembolso processado em até 5 dias úteis após aprovação
+- Reembolso via PIX ou estorno no cartão de crédito
+
+Política de reenvio:
+- Em caso de extravio ou entrega incorreta, o cliente tem direito a reenvio sem custo adicional
+- Prazo de reenvio: igual ao prazo original de entrega da região
+
+Horário de atendimento:
+- Segunda a sexta: 8h às 18h
+- Sábado: 9h às 13h
+- Domingos e feriados: sem atendimento
+
+Canais de atendimento:
+- Chat: disponível no site e aplicativo
+- E-mail: suporte@xyzentregas.com.br
+- Telefone: 0800 123 4567
+
+Política de rastreamento:
+- Código de rastreamento enviado por e-mail em até 24h após postagem
+- Atualização de status em tempo real no site e aplicativo
+
+Em caso de pedido constando como entregue mas não recebido:
+- Cliente deve acionar o suporte em até 48h após a data de entrega
+- Será aberta uma investigação com prazo de 3 dias úteis
+- Se confirmado extravio, cliente recebe reenvio ou reembolso integral
