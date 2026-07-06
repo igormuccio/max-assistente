@@ -38,6 +38,8 @@ O Max responde perguntas sobre políticas de uma empresa fictícia de entregas. 
 
 **Conclusão:** o efeito de `chunk_size` e `k` é interdependente, e o tamanho da base de conhecimento determina se um problema fica visível ou escondido. Um `chunk_size` fragmentado combinado com um `k` proporcionalmente baixo em uma base grande (milhares de documentos) deixaria muito mais informação relevante de fora do que em uma base pequena como esta.
 
+**Nota:** o `k=2` foi usado aqui apenas como teste de diagnóstico, para tornar visível o efeito da fragmentação. A decisão sobre o valor final de `k` foi retomada na Seção 5, após a introdução do `score_threshold`, que muda o papel que `k` desempenha no sistema.
+
 ## 4. Alucinação por combinação de fatos legítimos
 
 **Pergunta de teste:**
@@ -52,6 +54,8 @@ Esse cenário — atraso simples, sem extravio — não está coberto explicitam
 ## 5. `score_threshold`: filtrando por relevância em vez de um `k` fixo
 
 Como identificado na seção anterior, um `k` fixo sempre retorna o mesmo número de chunks, mesmo quando nem todos são relevantes. A alternativa testada foi o `search_type='similarity_score_threshold'` do LangChain, que descarta qualquer chunk abaixo de um limiar mínimo de relevância, usando `k` apenas como teto máximo.
+
+Com o `score_threshold` ativo, o papel do `k` muda: deixa de ser o principal filtro de relevância e passa a atuar apenas como teto máximo de chunks retornados, já que o threshold descarta antecipadamente qualquer chunk abaixo do limiar de relevância. Por esse motivo, o valor final adotado foi `k=4` — testado e confirmado no cenário de "meu pedido foi extraviado", onde 4 chunks distintos, todos genuinamente relevantes, passaram no filtro de relevância ao mesmo tempo.
 
 **Observação técnica importante:** o FAISS, por padrão, mede distância L2 (onde menor = mais parecido), enquanto o `score_threshold` do LangChain espera um score de relevância normalizado entre 0 e 1 (onde maior = mais relevante). O LangChain faz essa conversão internamente — o valor de threshold configurado deve ser pensado nessa segunda escala.
 
