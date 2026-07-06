@@ -5,6 +5,8 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+import logging
+logging.getLogger('langchain_core.vectorstores').setLevel(logging.ERROR)
 
 load_dotenv()
 
@@ -21,7 +23,10 @@ def carregar_base_conhecimento():
     chunks = splitter.split_documents(documentos)
     embeddings = OpenAIEmbeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    return vectorstore.as_retriever()
+    return vectorstore.as_retriever(
+    search_type='similarity_score_threshold',
+    search_kwargs={'score_threshold': 0.68, 'k': 4}
+)
 
 def buscar_contexto(retriever, pergunta):
     docs = retriever.invoke(pergunta)
@@ -60,7 +65,7 @@ def main():
             if texto:
                 reply += texto
 
-        if 'TRANSFERIR_HUMANO' in reply:
+        if 'TRANSFER_HUMANO' in reply.upper():
             print('Aguarde, vou transferir para um atendente.')
             print('[Sistema]: Transferindo...')
             break
