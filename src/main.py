@@ -44,6 +44,7 @@ def main():
     )
 
     messages = [SystemMessage(content=system_prompt)]
+    tentativas_sem_contexto = 0
 
     print('Max: Olá! Sou o Max, assistente da XYZ Entregas. Como posso ajudar?')
 
@@ -54,8 +55,22 @@ def main():
             break
 
         contexto = buscar_contexto(retriever, pergunta)
-        mensagem_com_contexto = f'{pergunta}\n\nInformações relevantes:\n{contexto}'
 
+        if not contexto.strip():
+            tentativas_sem_contexto += 1
+
+            if tentativas_sem_contexto >= 2:
+                print('Max: Não consegui entender sua solicitação. Vou te transferir para um atendente.')
+                print('[Sistema]: Transferindo...')
+                break
+
+            print('Max: Não entendi muito bem sua pergunta. Você pode explicar de outra forma, com mais detalhes sobre seu pedido?')
+            print()
+            continue
+
+        tentativas_sem_contexto = 0
+
+        mensagem_com_contexto = f'{pergunta}\n\nInformações relevantes:\n{contexto}'
         messages.append(HumanMessage(content=mensagem_com_contexto))
 
         print('Max: ', end='', flush=True)
