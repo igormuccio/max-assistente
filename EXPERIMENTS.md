@@ -38,7 +38,7 @@ O Max responde perguntas sobre políticas de uma empresa fictícia de entregas. 
 
 **Conclusão:** o efeito de `chunk_size` e `k` é interdependente, e o tamanho da base de conhecimento determina se um problema fica visível ou escondido. Um `chunk_size` fragmentado combinado com um `k` proporcionalmente baixo em uma base grande (milhares de documentos) deixaria muito mais informação relevante de fora do que em uma base pequena como esta.
 
-**Nota:** o `k=2` foi usado aqui apenas como teste de diagnóstico, para tornar visível o efeito da fragmentação. A decisão sobre o valor final de `k` foi retomada na Seção 5, após a introdução do `score_threshold`, que muda o papel que `k` desempenha no sistema.
+**Nota:** o `k=2` foi usado aqui apenas como teste de diagnóstico, não como configuração final — o objetivo era tornar visível o efeito da fragmentação que `k=4` estava mascarando. Esse experimento evidenciou as limitações de depender só de um número fixo de documentos, motivando a adoção de um `score_threshold` (limiar de similaridade), descrito na seção seguinte.
 
 ## 4. Alucinação por combinação de fatos legítimos
 
