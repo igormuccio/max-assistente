@@ -10,8 +10,9 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [4. Alucinação por combinação de fatos legítimos](#4-alucinação-por-combinação-de-fatos-legítimos)
 - [5. `score_threshold`: filtrando por relevância em vez de um `k` fixo](#5-score_threshold-filtrando-por-relevância-em-vez-de-um-k-fixo)
 - [6. Bug de marcador de controle confundido com linguagem natural](#6-bug-de-marcador-de-controle-confundido-com-linguagem-natural)
-- [7. Conclusões gerais](#7-conclusões-gerais)
-- [8. Próximos passos identificados](#8-próximos-passos-identificados-não-implementados-ainda)
+- [7. Limitação do `score_threshold`: transferência prematura sem contexto](#7-limitação-do-score_threshold-transferência-prematura-sem-contexto)
+- [8. Conclusões gerais](#8-conclusões-gerais)
+- [9. Próximos passos identificados](#9-próximos-passos-identificados-não-implementados-ainda)
 
 ## 1. Por que RAG neste projeto
 
@@ -94,15 +95,47 @@ Ao testar o `score_threshold` com uma pergunta fora do domínio (sem nenhum chun
 
 **Conclusão:** confiar na reprodução exata de uma palavra-chave de controle por um LLM é frágil, especialmente quando essa palavra se assemelha a vocabulário comum do idioma usado no restante do prompt. Marcadores de controle devem ser visualmente distintos de linguagem natural, e a validação no código deve ser tolerante a pequenas variações de grafia.
 
-## 7. Conclusões gerais
+## 7. Limitação do `score_threshold`: transferência prematura sem contexto
+
+O `score_threshold` resolve o problema de trazer chunks irrelevantes, mas introduz um efeito colateral: quando nenhum chunk atinge o limiar, o contexto retornado fica vazio, e o *system prompt* instrui o modelo a usar o marcador de transferência (`###TRANSFER_HUMANO###`) nesse caso. Isso significa que qualquer pergunta ambígua, mal formulada ou genuinamente fora do domínio resultava em transferência **imediata** para um atendente humano, sem nenhuma chance de o cliente reformular a pergunta.
+
+**Por que isso é um problema de produto, não só técnico:** transferir para atendimento humano tem custo real — tempo de fila, carga de trabalho do atendente, e perda de contexto (o atendente não tem acesso ao histórico da conversa com o Max). Tratar "não encontrei contexto relevante" como sinônimo de "preciso de um humano" descarta casos em que o problema era simplesmente uma pergunta mal formulada, resolvível com um pedido de esclarecimento.
+
+**Correção aplicada:** um contador de tentativas sem contexto (`tentativas_sem_contexto`), controlado inteiramente pelo código — não pelo modelo, para evitar depender da confiabilidade do LLM em "lembrar" quantas vezes uma regra já foi aplicada.
+
+- Na primeira vez que uma pergunta não retorna contexto relevante, o Max responde com uma mensagem fixa pedindo para o cliente reformular ou detalhar a pergunta, sem chamar o LLM.
+- Se a tentativa seguinte também não retornar contexto, a transferência para atendente humano é acionada diretamente pelo código.
+- Se, em qualquer momento, uma pergunta retornar contexto válido, o contador é reiniciado — o "crédito" de tentativas é renovado.
+
+```python
+if not contexto.strip():
+    tentativas_sem_contexto += 1
+
+    if tentativas_sem_contexto >= 2:
+        print('Max: Não consegui entender sua solicitação. Vou te transferir para um atendente.')
+        print('[Sistema]: Transferindo...')
+        break
+
+    print('Max: Não entendi muito bem sua pergunta. Você pode explicar de outra forma, com mais detalhes sobre seu pedido?')
+    continue
+
+tentativas_sem_contexto = 0
+```
+
+**Por que o controle ficou no código, e não no prompt:** essa decisão segue a mesma lição da Seção 6 — contar tentativas ou aplicar uma regra de forma consistente é um tipo de lógica que um LLM pode falhar em seguir de forma confiável ao longo de uma conversa longa. Colocando o contador como uma variável Python comum, o comportamento fica determinístico e não depende da interpretação do modelo.
+
+**Conclusão:** um mecanismo de recuperação (`score_threshold`) que descarta contexto irrelevante precisa de uma camada de decisão adicional para não converter automaticamente "sem contexto" em "transferir para humano". Separar essas duas coisas — dar ao cliente uma chance de reformular antes de escalar — reduz transferências desnecessárias sem comprometer o fallback para casos genuinamente fora do escopo do assistente.
+
+## 8. Conclusões gerais
 
 - RAG reduz alucinação, mas não a elimina — mesmo com contexto correto recuperado, o modelo pode combinar fatos legítimos de formas não autorizadas pelo negócio.
 - Instruções em linguagem natural no *system prompt* têm um teto de eficácia: proibições, checagens explícitas e restrições literais foram testadas e nenhuma bloqueou o comportamento por completo.
 - `chunk_size` e `k` não devem ser avaliados isoladamente — o tamanho da base de conhecimento determina se os efeitos de cada um ficam visíveis ou escondidos.
 - Um `score_threshold` calibrado com dados reais é mais robusto que um `k` fixo, mas ainda depende de uma escolha de engenharia dentro de uma margem, não de um valor absoluto.
 - Marcadores de controle (tokens especiais usados para acionar lógica no código) precisam ser distintos de linguagem natural, e a validação correspondente no código deve tolerar variações — nenhuma reprodução de texto por um LLM deve ser considerada 100% garantida.
+- Regras que dependem de contagem ou estado ao longo da conversa (como "quantas vezes isso já aconteceu") são mais confiáveis quando controladas por código determinístico do que quando delegadas inteiramente ao modelo.
 
-## 8. Próximos passos identificados (não implementados ainda)
+## 9. Próximos passos identificados (não implementados ainda)
 
 - **Grounding verification / self-checking:** uma segunda chamada ao modelo (ou validação em código) para verificar se a resposta usa alguma informação que não está literalmente no contexto, antes de exibi-la ao usuário.
 - **Few-shot prompting:** incluir no *system prompt* um exemplo concreto de pergunta ambígua com a resposta correta esperada, em vez de apenas descrever a regra de forma abstrata.
