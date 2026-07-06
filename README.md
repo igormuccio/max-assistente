@@ -122,6 +122,12 @@ python src/main.py
 - Streaming de respostas com LangChain
 - Organização de projetos Python
 
+## Testes e decisões técnicas
+
+Além de implementar o pipeline, testei na prática os limites de algumas decisões de RAG — como o `chunk_size` afeta a granularidade das respostas, como o parâmetro `k` do retriever interage com o tamanho da base de conhecimento, e até onde prompt engineering consegue evitar que o modelo combine informações reais de forma não autorizada.
+
+Documentei esse processo, com exemplos e conclusões, em [EXPERIMENTS.md](./EXPERIMENTS.md).
+
 ## Melhorias futuras
 
 - Persistência do índice FAISS em disco
