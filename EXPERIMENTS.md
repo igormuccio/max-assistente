@@ -20,7 +20,7 @@ O Max responde perguntas sobre políticas de uma empresa fictícia de entregas. 
 - fazer fine-tuning (caro, lento, precisa retreinar a cada mudança de política);
 - ou colar a base inteira no prompt (caro em tokens, e o modelo perde precisão com excesso de informação irrelevante).
 
-## 2. `chunk_size`: calibrando pelo conteúdo, não por padrão de tutorial
+## 2. `chunk_size`: calibrando pelo conteúdo da base de conhecimento
 
 **Teste:** medi o tamanho real de cada bloco de política no arquivo de conhecimento (~150–200 caracteres por regra) e comparei com o `chunk_size=500` usado inicialmente.
 
