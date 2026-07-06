@@ -17,7 +17,7 @@ def carregar_prompt():
 def carregar_base_conhecimento():
     loader = TextLoader(os.path.join(BASE_DIR, 'data', 'politicas.txt'), encoding='utf-8')
     documentos = loader.load()
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=20)
     chunks = splitter.split_documents(documentos)
     embeddings = OpenAIEmbeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
