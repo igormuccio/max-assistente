@@ -164,6 +164,8 @@ A resposta contém alguma afirmação, recomendação ou instrução que NÃO es
 
 **Por que a checagem de grounding vem depois da checagem de `TRANSFER_HUMANO`:** se o modelo já respondeu com o marcador de transferência, `reply` não contém uma afirmação factual a ser verificada — rodar o grounding nesse caso seria uma chamada de API desperdiçada.
 
+**Convenção usada nos testes:** `verificar_grounding` retorna `True` quando a resposta é considerada **não fundamentada** (contém algo fora do contexto, e deve ser bloqueada), e `False` quando a resposta está corretamente fundamentada e pode ser exibida. Nos termos usados a seguir, um **falso negativo** é quando o verificador retorna `False` (deixa passar) para uma resposta que, na verdade, continha uma inferência não fundamentada.
+
 **Resultados de teste:**
 
 | Pergunta | Contexto recuperado | Grounding | Avaliação |
@@ -183,6 +185,8 @@ A resposta contém alguma afirmação, recomendação ou instrução que NÃO es
 **Decisão sobre uso em produção:** apesar do ganho de confiabilidade observado com o `gpt-4o`, a configuração final do projeto permaneceu utilizando `gpt-4o-mini` em ambos os papéis. O custo por token do `gpt-4o` é cerca de 17x maior (US$ 2,50/US$ 10,00 vs. US$ 0,15/US$ 0,60 por milhão de tokens, entrada/saída), e o objetivo educacional do projeto, somado à natureza pontual do falso negativo encontrado (1 em 7 testes), não justificou o custo extra. Em um ambiente de produção real, essa escolha poderia ser diferente, considerando o impacto financeiro de respostas incorretas e a criticidade do domínio — nesse caso, o custo do risco (reputação, retrabalho) pode superar o custo da chamada mais cara. A troca de modelo permanece documentada como uma opção validada, disponível para revisão caso a taxa de falso negativo se mostre maior em uso real.
 
 **Conclusão:** grounding verification reduz de forma significativa a taxa de alucinação por combinação de fatos — um problema que nenhuma outra camada (prompt engineering, `temperature`, `score_threshold`) havia conseguido bloquear. Ainda assim, não elimina o problema por completo: uma segunda camada de verificação com o mesmo modelo que gerou a resposta carrega parte dos mesmos vieses, então o resultado deve ser tratado como redução de risco, não garantia absoluta. Um verificador com modelo mais forte reduz esse viés, em evidência observada num teste controlado, mas ao custo de uma chamada de API significativamente mais cara — uma decisão de trade-off entre segurança e custo operacional, não uma correção "gratuita".
+
+**Possível evolução futura:** a escolha de modelo não precisa ser a mesma para os dois papéis. Uma arquitetura mais madura poderia manter um modelo econômico (`gpt-4o-mini`) para gerar respostas — a etapa de maior volume de chamadas — e reservar um modelo mais robusto apenas para a etapa crítica de verificação, que ocorre uma vez por resposta. Isso concentraria o custo mais alto exatamente onde a segurança importa mais, em vez de pagar o mesmo prêmio em toda a interação.
 
 ## 9. Conclusões gerais
 
