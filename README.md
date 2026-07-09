@@ -74,10 +74,11 @@ max-assistente/
 ├── prompts/
 │   └── system.txt          # Personalidade e regras do assistente
 ├── src/
-│   └── main.py             # Código principal
-├── .env.example            # Exemplo de variáveis de ambiente
+│   └── main.py              # Código principal
+├── .env.example             # Exemplo de variáveis de ambiente
 ├── .gitignore
 ├── requirements.txt
+├── EXPERIMENTS.md           # Documentação de testes e decisões técnicas
 └── README.md
 ```
 
