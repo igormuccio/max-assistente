@@ -56,7 +56,7 @@ def main():
         temperature=0.3,
         streaming=True
     )
-
+    
     messages = [SystemMessage(content=system_prompt)]
     tentativas_sem_contexto = 0
 
