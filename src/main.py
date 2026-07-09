@@ -32,6 +32,20 @@ def buscar_contexto(retriever, pergunta):
     docs = retriever.invoke(pergunta)
     return '\n'.join([doc.page_content for doc in docs])
 
+def verificar_grounding(llm, contexto, resposta):
+    prompt_verificacao = f"""Você é um verificador de fatos. Analise se a resposta abaixo usa APENAS informações presentes no contexto fornecido, sem inferências ou combinações não explícitas.
+
+Contexto:
+{contexto}
+
+Resposta a verificar:
+{resposta}
+
+A resposta contém alguma afirmação, recomendação ou instrução que NÃO está literalmente escrita no contexto acima? Responda apenas SIM ou NÃO."""
+
+    verificacao = llm.invoke(prompt_verificacao)
+    return 'SIM' in verificacao.content.upper()
+
 def main():
     print('Carregando Max...')
     system_prompt = carregar_prompt()
@@ -82,6 +96,13 @@ def main():
 
         if 'TRANSFER_HUMANO' in reply.upper():
             print('Aguarde, vou transferir para um atendente.')
+            print('[Sistema]: Transferindo...')
+            break
+
+        grounding_falhou = verificar_grounding(llm, contexto, reply)
+
+        if grounding_falhou:
+            print('Max: Não tenho essa informação específica no momento, vou te transferir para um atendente humano que pode te ajudar melhor.')
             print('[Sistema]: Transferindo...')
             break
 

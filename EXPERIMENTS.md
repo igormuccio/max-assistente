@@ -11,8 +11,9 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [5. `score_threshold`: filtrando por relevância em vez de um `k` fixo](#5-score_threshold-filtrando-por-relevância-em-vez-de-um-k-fixo)
 - [6. Limitação do `score_threshold`: transferência prematura sem contexto](#6-limitação-do-score_threshold-transferência-prematura-sem-contexto)
 - [7. Bug de marcador de controle confundido com linguagem natural](#7-bug-de-marcador-de-controle-confundido-com-linguagem-natural)
-- [8. Conclusões gerais](#8-conclusões-gerais)
-- [9. Próximos passos identificados](#9-próximos-passos-identificados-não-implementados-ainda)
+- [8. Grounding verification: bloqueando inferências não fundamentadas](#8-grounding-verification-bloqueando-inferências-não-fundamentadas)
+- [9. Conclusões gerais](#9-conclusões-gerais)
+- [10. Próximos passos identificados](#10-próximos-passos-identificados-não-implementados-ainda)
 
 ## 1. Por que RAG neste projeto
 
@@ -126,7 +127,60 @@ Ao testar o `score_threshold` com uma pergunta fora do domínio (sem nenhum chun
 
 **Conclusão:** confiar na reprodução exata de uma palavra-chave de controle por um LLM é frágil, especialmente quando essa palavra se assemelha a vocabulário comum do idioma usado no restante do prompt. Marcadores de controle devem ser visualmente distintos de linguagem natural, e a validação no código deve ser tolerante a pequenas variações de grafia.
 
-## 8. Conclusões gerais
+## 8. Grounding verification: bloqueando inferências não fundamentadas
+
+A Seção 4 documentou um problema que ficou em aberto por toda a investigação: quando o contexto recuperado é relacionado à pergunta, mas não cobre exatamente o cenário descrito, o modelo tende a preencher a lacuna combinando fatos reais em uma inferência não autorizada (ex.: "aguarde mais um pouco"). Nem `score_threshold`, nem o contador de tentativas resolvem esse caso — os dois só agem quando o contexto está **vazio**, e aqui o contexto existe, só está incompleto.
+
+**Abordagens consideradas:** duas estratégias foram avaliadas antes da implementação.
+
+| | Segunda chamada ao modelo (LLM-as-judge) | Validação estruturada em código |
+|---|---|---|
+| Custo de API | Alto (dobra chamadas) | Baixo |
+| Latência | Maior | Menor |
+| Complexidade de implementação | Menor | Maior (exige formato de citação rígido e verificável) |
+| Robustez | Maior | Menor (depende do modelo seguir o formato exigido) |
+
+A decisão foi pela primeira abordagem, priorizando segurança sobre custo operacional: para um chatbot de atendimento, o custo de uma resposta incorreta (reputação, retrabalho) supera o custo de uma chamada extra de API.
+
+**Implementação:** depois que a resposta do Max (`reply`) é gerada, uma segunda chamada ao modelo — com um prompt isolado, sem as regras de atendimento do Max — verifica se a resposta contém alguma afirmação não presente literalmente no contexto.
+
+```python
+def verificar_grounding(llm, contexto, resposta):
+    prompt_verificacao = f"""Você é um verificador de fatos. Analise se a resposta abaixo usa APENAS informações presentes no contexto fornecido, sem inferências ou combinações não explícitas.
+
+Contexto:
+{contexto}
+
+Resposta a verificar:
+{resposta}
+
+A resposta contém alguma afirmação, recomendação ou instrução que NÃO está literalmente escrita no contexto acima? Responda apenas SIM ou NÃO."""
+
+    verificacao = llm.invoke(prompt_verificacao)
+    return 'SIM' in verificacao.content.upper()
+```
+
+**Por que o prompt de verificação é isolado do *system prompt* do Max:** reaproveitar o mesmo prompt (com suas 12 regras de atendimento) geraria instruções concorrentes — "seja o Max, atendente empático" e "seja um verificador crítico" ao mesmo tempo. Um prompt dedicado, sem outras responsabilidades, evita esse conflito.
+
+**Por que a checagem de grounding vem depois da checagem de `TRANSFER_HUMANO`:** se o modelo já respondeu com o marcador de transferência, `reply` não contém uma afirmação factual a ser verificada — rodar o grounding nesse caso seria uma chamada de API desperdiçada.
+
+**Resultados de teste:**
+
+| Pergunta | Contexto recuperado | Grounding | Avaliação |
+|---|---|---|---|
+| "atraso simples" (Seção 4) | Parcial, sem regra explícita | Bloqueou | ✅ Correto |
+| "prazo pro sul" | Específico e completo | Passou | ✅ Correto |
+| "meu pedido foi extraviado" (4 chunks) | Múltiplas fontes legítimas | Passou | ✅ Correto (combinação válida) |
+| "6 dias sem receber reembolso" | Comparação numérica explícita | Transferiu antes do grounding (o próprio Max reconheceu a lacuna) | ✅ Correto |
+| "reembolso demorando um pouco mais" | Prazo real + convite a sugestão genérica | Passou, mas a resposta continha "acione o suporte" — não fundamentado | ❌ Falso negativo |
+| "reenvio sem atualização de status" | Mesmo padrão do caso anterior | Bloqueou | ✅ Correto |
+| "sem código de rastreamento" | Mesmo padrão | Bloqueou | ✅ Correto |
+
+**Limitação identificada:** de 7 perguntas testadas, 6 tiveram o comportamento esperado e 1 vazou uma inferência (uma sugestão de ação genérica, não um dado inventado). Tentativas de reproduzir esse mesmo padrão em outras perguntas estruturalmente parecidas não repetiram a falha — sugerindo um caso isolado, não uma falha sistemática. A causa provável é que o verificador usa o mesmo modelo (e portanto os mesmos vieses) que gera a resposta original: uma sugestão como "acione o suporte" pode não ser reconhecida como violação por parecer bom senso de atendimento, em vez de uma invenção factual explícita. Isso é consistente com uma limitação conhecida da técnica de LLM-as-judge — usar o mesmo modelo (ou modelo da mesma família) para gerar e verificar tende a ter pontos cegos correlacionados.
+
+**Conclusão:** grounding verification reduz de forma significativa a taxa de alucinação por combinação de fatos — um problema que nenhuma outra camada (prompt engineering, `temperature`, `score_threshold`) havia conseguido bloquear. Ainda assim, não elimina o problema por completo: uma segunda camada de verificação com o mesmo modelo que gerou a resposta carrega parte dos mesmos vieses, então o resultado deve ser tratado como redução de risco, não garantia absoluta.
+
+## 9. Conclusões gerais
 
 - RAG reduz alucinação, mas não a elimina — mesmo com contexto correto recuperado, o modelo pode combinar fatos legítimos de formas não autorizadas pelo negócio.
 - Instruções em linguagem natural no *system prompt* têm um teto de eficácia: proibições, checagens explícitas e restrições literais foram testadas e nenhuma bloqueou o comportamento por completo.
@@ -134,11 +188,12 @@ Ao testar o `score_threshold` com uma pergunta fora do domínio (sem nenhum chun
 - Um `score_threshold` calibrado com dados reais é mais robusto que um `k` fixo, mas ainda depende de uma escolha de engenharia dentro de uma margem, não de um valor absoluto.
 - Marcadores de controle (tokens especiais usados para acionar lógica no código) precisam ser distintos de linguagem natural, e a validação correspondente no código deve tolerar variações — nenhuma reprodução de texto por um LLM deve ser considerada 100% garantida.
 - Regras que dependem de contagem ou estado ao longo da conversa (como "quantas vezes isso já aconteceu") são mais confiáveis quando controladas por código determinístico do que quando delegadas inteiramente ao modelo.
+- Grounding verification com uma segunda chamada ao mesmo modelo reduz drasticamente, mas não elimina, alucinação por inferência — porque o verificador herda parte dos vieses do modelo que está verificando.
 
-## 9. Próximos passos identificados (não implementados ainda)
+## 10. Próximos passos identificados (não implementados ainda)
 
-- **Grounding verification / self-checking:** uma segunda chamada ao modelo (ou validação em código) para verificar se a resposta usa alguma informação que não está literalmente no contexto, antes de exibi-la ao usuário.
+- **Verificador com modelo diferente:** usar um modelo distinto (ou de outra família) para o grounding verification, reduzindo a correlação de vieses entre gerador e verificador.
 - **Few-shot prompting:** incluir no *system prompt* um exemplo concreto de pergunta ambígua com a resposta correta esperada, em vez de apenas descrever a regra de forma abstrata.
 - **Cobertura de conteúdo:** adicionar uma regra explícita para o cenário de "atraso simples" na base de conhecimento, eliminando a lacuna que hoje força o modelo a inferir.
-- **Eval set mais robusto:** ampliar o conjunto de perguntas de teste usado para calibrar `score_threshold`, cobrindo mais variações de pergunta específica, difusa e fora do domínio.
+- **Eval set mais robusto:** ampliar o conjunto de perguntas de teste usado para calibrar `score_threshold` e o grounding verification, cobrindo mais variações de pergunta específica, difusa e fora do domínio.
 - **Persistência do índice FAISS:** salvar o índice em disco em vez de recriá-lo a cada execução, reduzindo custo de reprocessamento e eliminando qualquer variável de recomputação de embeddings entre execuções.
