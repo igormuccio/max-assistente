@@ -12,8 +12,9 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [6. Limitação do `score_threshold`: transferência prematura sem contexto](#6-limitação-do-score_threshold-transferência-prematura-sem-contexto)
 - [7. Bug de marcador de controle confundido com linguagem natural](#7-bug-de-marcador-de-controle-confundido-com-linguagem-natural)
 - [8. Grounding verification: bloqueando inferências não fundamentadas](#8-grounding-verification-bloqueando-inferências-não-fundamentadas)
-- [9. Conclusões gerais](#9-conclusões-gerais)
-- [10. Próximos passos identificados](#10-próximos-passos-identificados-não-implementados-ainda)
+- [9. Persistência do índice FAISS: eliminando reprocessamento desnecessário](#9-persistência-do-índice-faiss-eliminando-reprocessamento-desnecessário)
+- [10. Conclusões gerais](#10-conclusões-gerais)
+- [11. Próximos passos identificados](#11-próximos-passos-identificados-não-implementados-ainda)
 
 ## 1. Por que RAG neste projeto
 
@@ -188,7 +189,71 @@ A resposta contém alguma afirmação, recomendação ou instrução que NÃO es
 
 **Possível evolução futura:** a escolha de modelo não precisa ser a mesma para os dois papéis. Uma arquitetura mais madura poderia manter um modelo econômico (`gpt-4o-mini`) para gerar respostas — a etapa de maior volume de chamadas — e reservar um modelo mais robusto apenas para a etapa crítica de verificação, que ocorre uma vez por resposta. Isso concentraria o custo mais alto exatamente onde a segurança importa mais, em vez de pagar o mesmo prêmio em toda a interação.
 
-## 9. Conclusões gerais
+## 9. Persistência do índice FAISS: eliminando reprocessamento desnecessário
+
+Nas versões anteriores do projeto, `carregar_base_conhecimento()` recalculava o índice FAISS do zero a cada execução — carregando o `politicas.txt`, quebrando em chunks e gerando embeddings via API da OpenAI para cada um deles, mesmo quando nada havia mudado desde a última vez. Isso levava entre 10 e 15 segundos por execução, um custo que cresceria proporcionalmente ao tamanho da base de conhecimento em um cenário de produção real.
+
+**Estratégia adotada:** salvar o índice em disco após o primeiro cálculo, e nas execuções seguintes, carregar esse índice já pronto — recalculando do zero apenas quando o `politicas.txt` for alterado. Para detectar essa alteração, a data de modificação do arquivo (`os.path.getmtime`) é salva junto com o índice, em um arquivo de metadados separado; a cada execução, essa data é comparada com a data atual do arquivo antes de decidir qual caminho seguir.
+
+```python
+def carregar_base_conhecimento():
+    caminho_politicas = os.path.join(BASE_DIR, 'data', 'politicas.txt')
+    caminho_indice = os.path.join(BASE_DIR, 'data', 'faiss_index')
+    caminho_metadata = os.path.join(BASE_DIR, 'data', 'faiss_metadata.txt')
+
+    data_modificacao_atual = str(os.path.getmtime(caminho_politicas))
+    embeddings = OpenAIEmbeddings()
+
+    indice_existe = os.path.exists(caminho_indice)
+    metadata_existe = os.path.exists(caminho_metadata)
+
+    if indice_existe and metadata_existe:
+        with open(caminho_metadata, 'r') as f:
+            data_modificacao_salva = f.read().strip()
+
+        if data_modificacao_salva == data_modificacao_atual:
+            vectorstore = FAISS.load_local(caminho_indice, embeddings, allow_dangerous_deserialization=True)
+            return vectorstore.as_retriever(
+                search_type='similarity_score_threshold',
+                search_kwargs={'score_threshold': 0.68, 'k': 4}
+            )
+
+    loader = TextLoader(caminho_politicas, encoding='utf-8')
+    documentos = loader.load()
+    splitter = RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=20)
+    chunks = splitter.split_documents(documentos)
+    vectorstore = FAISS.from_documents(chunks, embeddings)
+
+    vectorstore.save_local(caminho_indice)
+    with open(caminho_metadata, 'w') as f:
+        f.write(data_modificacao_atual)
+
+    return vectorstore.as_retriever(
+        search_type='similarity_score_threshold',
+        search_kwargs={'score_threshold': 0.68, 'k': 4}
+    )
+```
+
+**Por que a checagem de data precisa vir antes de qualquer processamento:** o objetivo da persistência é evitar trabalho desnecessário. Se a comparação de datas acontecesse depois de já ter carregado o arquivo e gerado os embeddings, o tempo e o custo que se queria evitar já teriam sido gastos antes da decisão ser tomada.
+
+**Por que a data de modificação precisa ser salva em um arquivo próprio:** `vectorstore.save_local()` gera dois arquivos (`index.faiss`, com os vetores, e `index.pkl`, com o texto original de cada chunk) — nenhum dos dois guarda informação sobre quando o arquivo de origem foi editado, porque esse não é o propósito deles. Um terceiro arquivo, criado especificamente para esse controle, foi necessário.
+
+**Sobre `allow_dangerous_deserialization=True`:** esse parâmetro é uma confirmação explícita, exigida pelo LangChain, de que a origem do arquivo carregado é confiável — o formato de serialização usado (`pickle`) pode, em tese, executar código arbitrário se o arquivo carregado vier de uma fonte não verificada. Como o índice é gerado pelo próprio projeto, na própria máquina, esse risco não se aplica aqui; a confirmação existe para casos onde um índice fosse compartilhado ou baixado de terceiros.
+
+**Resultado medido:** para confirmar o ganho real (e não apenas a percepção de "ficou mais rápido"), o tempo de cada etapa foi medido com `time.time()` em uma execução com o índice já persistido:
+
+| Etapa | Tempo |
+|---|---|
+| Imports das bibliotecas (langchain, faiss, etc.) | 2.73s |
+| Criar `OpenAIEmbeddings()` | 0.70s |
+| `FAISS.load_local()` | 0.17s |
+| Total até a saudação do Max aparecer | 3.64s |
+
+**Descoberta inesperada:** o tempo ainda percebido como "não tão rápido quanto esperado" (uns 5-6 segundos, na sensação inicial) não vinha mais do FAISS ou dos embeddings — a persistência eliminou esse gargalo com sucesso (`load_local()` levou apenas 0.17s). O tempo restante é dominado pelos **imports das bibliotecas** (2.73s, mais de 75% do tempo total), uma etapa anterior a qualquer lógica de persistência, comum a qualquer projeto que use LangChain e não relacionada ao tamanho da base de conhecimento.
+
+**Conclusão:** a persistência resolveu o problema real que motivou a mudança — o reprocessamento repetido de embeddings, que escalaria mal com uma base de conhecimento maior. O tempo de import das bibliotecas é um custo fixo e comum ao framework, não um sintoma do problema original, e não vale a pena otimizar mais a fundo para um projeto deste porte. Medir antes de continuar otimizando evitou gastar esforço perseguindo um gargalo que já não existia mais.
+
+## 10. Conclusões gerais
 
 - RAG reduz alucinação, mas não a elimina — mesmo com contexto correto recuperado, o modelo pode combinar fatos legítimos de formas não autorizadas pelo negócio.
 - Instruções em linguagem natural no *system prompt* têm um teto de eficácia: proibições, checagens explícitas e restrições literais foram testadas e nenhuma bloqueou o comportamento por completo.
@@ -197,10 +262,10 @@ A resposta contém alguma afirmação, recomendação ou instrução que NÃO es
 - Marcadores de controle (tokens especiais usados para acionar lógica no código) precisam ser distintos de linguagem natural, e a validação correspondente no código deve tolerar variações — nenhuma reprodução de texto por um LLM deve ser considerada 100% garantida.
 - Regras que dependem de contagem ou estado ao longo da conversa (como "quantas vezes isso já aconteceu") são mais confiáveis quando controladas por código determinístico do que quando delegadas inteiramente ao modelo.
 - Grounding verification com uma segunda chamada ao mesmo modelo reduz drasticamente, mas não elimina, alucinação por inferência — porque o verificador herda parte dos vieses do modelo que está verificando. Um modelo mais forte no papel de verificador comprovadamente reduz esse viés, mas a decisão de adotá-lo é uma escolha de custo, não uma correção óbvia.
+- Otimização de performance deve ser guiada por medição, não por sensação: o gargalo percebido nem sempre é o gargalo real, e resolver o problema errado consome tempo sem resultado.
 
-## 10. Próximos passos identificados (não implementados ainda)
+## 11. Próximos passos identificados (não implementados ainda)
 
 - **Few-shot prompting:** incluir no *system prompt* um exemplo concreto de pergunta ambígua com a resposta correta esperada, em vez de apenas descrever a regra de forma abstrata.
 - **Cobertura de conteúdo:** adicionar uma regra explícita para o cenário de "atraso simples" na base de conhecimento, eliminando a lacuna que hoje força o modelo a inferir.
 - **Eval set mais robusto:** ampliar o conjunto de perguntas de teste usado para calibrar `score_threshold` e o grounding verification, cobrindo mais variações de pergunta específica, difusa e fora do domínio — para determinar se a taxa de falso negativo do verificador `gpt-4o-mini` justifica o custo extra do `gpt-4o` em uso real.
-- **Persistência do índice FAISS:** salvar o índice em disco em vez de recriá-lo a cada execução, reduzindo custo de reprocessamento e eliminando qualquer variável de recomputação de embeddings entre execuções.

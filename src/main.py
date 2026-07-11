@@ -17,16 +17,43 @@ def carregar_prompt():
         return f.read()
 
 def carregar_base_conhecimento():
-    loader = TextLoader(os.path.join(BASE_DIR, 'data', 'politicas.txt'), encoding='utf-8')
+    caminho_politicas = os.path.join(BASE_DIR, 'data', 'politicas.txt')
+    caminho_indice = os.path.join(BASE_DIR, 'data', 'faiss_index')
+    caminho_metadata = os.path.join(BASE_DIR, 'data', 'faiss_metadata.txt')
+
+    data_modificacao_atual = str(os.path.getmtime(caminho_politicas))
+    embeddings = OpenAIEmbeddings()
+
+    indice_existe = os.path.exists(caminho_indice)
+    metadata_existe = os.path.exists(caminho_metadata)
+
+    if indice_existe and metadata_existe:
+        with open(caminho_metadata, 'r') as f:
+            data_modificacao_salva = f.read().strip()
+
+        if data_modificacao_salva == data_modificacao_atual:
+            print('Índice já atualizado, carregando do disco...')
+            vectorstore = FAISS.load_local(caminho_indice, embeddings, allow_dangerous_deserialization=True)
+            return vectorstore.as_retriever(
+                search_type='similarity_score_threshold',
+                search_kwargs={'score_threshold': 0.68, 'k': 4}
+            )
+
+    print('Recalculando embeddings...')
+    loader = TextLoader(caminho_politicas, encoding='utf-8')
     documentos = loader.load()
     splitter = RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=20)
     chunks = splitter.split_documents(documentos)
-    embeddings = OpenAIEmbeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
+
+    vectorstore.save_local(caminho_indice)
+    with open(caminho_metadata, 'w') as f:
+        f.write(data_modificacao_atual)
+
     return vectorstore.as_retriever(
-    search_type='similarity_score_threshold',
-    search_kwargs={'score_threshold': 0.68, 'k': 4}
-)
+        search_type='similarity_score_threshold',
+        search_kwargs={'score_threshold': 0.68, 'k': 4}
+    )
 
 def buscar_contexto(retriever, pergunta):
     docs = retriever.invoke(pergunta)
@@ -56,7 +83,7 @@ def main():
         temperature=0.3,
         streaming=True
     )
-    
+
     messages = [SystemMessage(content=system_prompt)]
     tentativas_sem_contexto = 0
 
