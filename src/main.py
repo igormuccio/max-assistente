@@ -1,11 +1,17 @@
 import os
+import warnings
+import logging
+
 from dotenv import load_dotenv
+
+warnings.filterwarnings('ignore', category=DeprecationWarning, message='.*langchain-community.*')
+
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-import logging
+
 logging.getLogger('langchain_core.vectorstores').setLevel(logging.ERROR)
 
 load_dotenv()
