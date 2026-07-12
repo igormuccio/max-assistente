@@ -1,22 +1,24 @@
 import os
-import warnings
 import logging
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.makedirs(os.path.join(BASE_DIR, 'logs'), exist_ok=True)
+
+logging.basicConfig(
+    filename=os.path.join(BASE_DIR, 'logs', 'app.log'),
+    level=logging.WARNING,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logging.captureWarnings(True)
+
 from dotenv import load_dotenv
-
-warnings.filterwarnings('ignore', category=DeprecationWarning, message='.*langchain-community.*')
-
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
-logging.getLogger('langchain_core.vectorstores').setLevel(logging.ERROR)
-
 load_dotenv()
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def carregar_prompt():
     with open(os.path.join(BASE_DIR, 'prompts', 'system.txt'), 'r', encoding='utf-8') as f:

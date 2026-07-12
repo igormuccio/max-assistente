@@ -13,8 +13,9 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [7. Bug de marcador de controle confundido com linguagem natural](#7-bug-de-marcador-de-controle-confundido-com-linguagem-natural)
 - [8. Grounding verification: bloqueando inferências não fundamentadas](#8-grounding-verification-bloqueando-inferências-não-fundamentadas)
 - [9. Persistência do índice FAISS: eliminando reprocessamento desnecessário](#9-persistência-do-índice-faiss-eliminando-reprocessamento-desnecessário)
-- [10. Conclusões gerais](#10-conclusões-gerais)
-- [11. Próximos passos identificados](#11-próximos-passos-identificados-não-implementados-ainda)
+- [10. Separando logs técnicos da interface do usuário](#10-separando-logs-técnicos-da-interface-do-usuário)
+- [11. Conclusões gerais](#11-conclusões-gerais)
+- [12. Próximos passos identificados](#12-próximos-passos-identificados-não-implementados-ainda)
 
 ## 1. Por que RAG neste projeto
 
@@ -253,7 +254,44 @@ def carregar_base_conhecimento():
 
 **Conclusão:** a persistência resolveu o problema real que motivou a mudança — o reprocessamento repetido de embeddings, que escalaria mal com uma base de conhecimento maior. O tempo de import das bibliotecas é um custo fixo e comum ao framework, não um sintoma do problema original, e não vale a pena otimizar mais a fundo para um projeto deste porte. Medir antes de continuar otimizando evitou gastar esforço perseguindo um gargalo que já não existia mais.
 
-## 10. Conclusões gerais
+## 10. Separando logs técnicos da interface do usuário
+
+O projeto acumulou dois tipos de aviso técnico ao longo do desenvolvimento: um `DeprecationWarning` do `langchain-community` (emitido pelo módulo `warnings` do Python no momento do import) e um `WARNING` interno do LangChain quando `score_threshold` não encontra nenhum chunk relevante (emitido pelo módulo `logging`). Nas primeiras versões, cada um foi resolvido de forma pontual, com filtros que **descartavam** a mensagem por completo (`warnings.filterwarnings('ignore', ...)` e `logging.getLogger(...).setLevel(logging.ERROR)`) — suficiente para manter o terminal limpo, mas às custas de perder qualquer rastro desses eventos.
+
+**Problema com a abordagem de descarte:** silenciar um aviso o torna invisível também para quem desenvolve o projeto. Se um comportamento inesperado começasse a gerar avisos com mais frequência em uso real, não haveria como perceber, porque a mensagem nunca chega a existir em lugar nenhum.
+
+**Estratégia adotada:** em vez de descartar, os avisos passaram a ser **redirecionados** para um arquivo de log (`logs/app.log`), mantendo o terminal visível ao usuário limpo, mas preservando o histórico para consulta e depuração.
+
+```python
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.makedirs(os.path.join(BASE_DIR, 'logs'), exist_ok=True)
+
+logging.basicConfig(
+    filename=os.path.join(BASE_DIR, 'logs', 'app.log'),
+    level=logging.WARNING,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logging.captureWarnings(True)
+```
+
+**Por que `logging.captureWarnings(True)` era necessário:** os módulos `warnings` e `logging` são sistemas independentes no Python, que não se comunicam por padrão. Essa função cria uma ponte, redirecionando o que passaria pelo `warnings` (como o `DeprecationWarning`) para dentro do sistema de `logging`, permitindo que os dois tipos de aviso — de origens diferentes — sejam capturados pela mesma configuração de arquivo.
+
+**Por que essa configuração precisa vir antes dos imports do LangChain:** o `DeprecationWarning` é disparado no exato momento em que `from langchain_community.vectorstores import FAISS` é executado. Se a configuração de log viesse depois dessa linha, o aviso já teria sido descartado (ou impresso no terminal) antes de existir qualquer lugar para redirecioná-lo.
+
+**Por que a pasta `logs/` é criada em código, e não apenas documentada como pré-requisito:** ela foi adicionada ao `.gitignore` (arquivos de log são artefatos de execução, não código-fonte, e crescem a cada uso). Isso significa que ela nunca existirá automaticamente ao clonar o repositório. Documentar "crie a pasta antes de rodar" transferiria ao usuário uma responsabilidade que o próprio programa pode cumprir de forma confiável com uma linha (`os.makedirs(..., exist_ok=True)`), sem custo perceptível em qualquer execução.
+
+**Resultado:** ambos os tipos de aviso passaram a ser registrados em `logs/app.log`, com data, hora e nível de severidade, sem aparecer no terminal:
+
+```
+2026-07-11 21:51:36,916 - WARNING - .../main.py:16: DeprecationWarning: `langchain-community` is being sunset...
+2026-07-11 21:52:40,706 - WARNING - No relevant docs were retrieved using the relevance score threshold 0.68
+```
+
+Vale notar que o segundo aviso passou a ser capturado sem precisar de nenhum filtro específico por módulo (como o `logging.getLogger('langchain_core.vectorstores')` usado anteriormente) — a configuração de `level=logging.WARNING` no `basicConfig` já captura qualquer aviso desse nível ou mais grave, de qualquer origem que use o sistema `logging`, tornando a solução mais genérica e resiliente a avisos futuros ainda não identificados.
+
+**Conclusão:** existe uma diferença prática entre "silenciar" e "redirecionar" um aviso técnico. Descartar é apropriado quando a mensagem é comprovadamente irrelevante; redirecionar para um log é mais apropriado quando a mensagem pode ter valor de diagnóstico futuro, mesmo não sendo destinada ao usuário final. Separar canais de saída — interface do usuário via `print()`, diagnóstico técnico via `logging` em arquivo — é uma prática comum em aplicações reais, especialmente à medida que um projeto de terminal evolui para algo servido como aplicação (API, interface web).
+
+## 11. Conclusões gerais
 
 - RAG reduz alucinação, mas não a elimina — mesmo com contexto correto recuperado, o modelo pode combinar fatos legítimos de formas não autorizadas pelo negócio.
 - Instruções em linguagem natural no *system prompt* têm um teto de eficácia: proibições, checagens explícitas e restrições literais foram testadas e nenhuma bloqueou o comportamento por completo.
@@ -263,8 +301,9 @@ def carregar_base_conhecimento():
 - Regras que dependem de contagem ou estado ao longo da conversa (como "quantas vezes isso já aconteceu") são mais confiáveis quando controladas por código determinístico do que quando delegadas inteiramente ao modelo.
 - Grounding verification com uma segunda chamada ao mesmo modelo reduz drasticamente, mas não elimina, alucinação por inferência — porque o verificador herda parte dos vieses do modelo que está verificando. Um modelo mais forte no papel de verificador comprovadamente reduz esse viés, mas a decisão de adotá-lo é uma escolha de custo, não uma correção óbvia.
 - Otimização de performance deve ser guiada por medição, não por sensação: o gargalo percebido nem sempre é o gargalo real, e resolver o problema errado consome tempo sem resultado.
+- Silenciar um aviso técnico e redirecioná-lo para um log são decisões diferentes: a primeira descarta informação, a segunda a preserva para diagnóstico sem expô-la à interface do usuário.
 
-## 11. Próximos passos identificados (não implementados ainda)
+## 12. Próximos passos identificados (não implementados ainda)
 
 - **Few-shot prompting:** incluir no *system prompt* um exemplo concreto de pergunta ambígua com a resposta correta esperada, em vez de apenas descrever a regra de forma abstrata.
 - **Cobertura de conteúdo:** adicionar uma regra explícita para o cenário de "atraso simples" na base de conhecimento, eliminando a lacuna que hoje força o modelo a inferir.
