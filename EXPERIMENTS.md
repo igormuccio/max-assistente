@@ -14,8 +14,9 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [8. Grounding verification: bloqueando inferências não fundamentadas](#8-grounding-verification-bloqueando-inferências-não-fundamentadas)
 - [9. Persistência do índice FAISS: eliminando reprocessamento desnecessário](#9-persistência-do-índice-faiss-eliminando-reprocessamento-desnecessário)
 - [10. Separando logs técnicos da interface do usuário](#10-separando-logs-técnicos-da-interface-do-usuário)
-- [11. Conclusões gerais](#11-conclusões-gerais)
-- [12. Próximos passos identificados](#12-próximos-passos-identificados-não-implementados-ainda)
+- [11. Detecção de saudação: evitando penalizar small talk](#11-detecção-de-saudação-evitando-penalizar-small-talk)
+- [12. Conclusões gerais](#12-conclusões-gerais)
+- [13. Próximos passos identificados](#13-próximos-passos-identificados-não-implementados-ainda)
 
 ## 1. Por que RAG neste projeto
 
@@ -291,7 +292,56 @@ Vale notar que o segundo aviso passou a ser capturado sem precisar de nenhum fil
 
 **Conclusão:** existe uma diferença prática entre "silenciar" e "redirecionar" um aviso técnico. Descartar é apropriado quando a mensagem é comprovadamente irrelevante; redirecionar para um log é mais apropriado quando a mensagem pode ter valor de diagnóstico futuro, mesmo não sendo destinada ao usuário final. Separar canais de saída — interface do usuário via `print()`, diagnóstico técnico via `logging` em arquivo — é uma prática comum em aplicações reais, especialmente à medida que um projeto de terminal evolui para algo servido como aplicação (API, interface web).
 
-## 11. Conclusões gerais
+## 11. Detecção de saudação: evitando penalizar small talk
+
+Testando o fluxo manualmente, foi observado que uma saudação simples ("ola") gerava contexto vazio na busca (nenhum chunk do `politicas.txt` é relevante para um cumprimento) e disparava o contador `tentativas_sem_contexto` da mesma forma que uma pergunta genuinamente fora do domínio. Em uma sequência de duas saudações seguidas — comportamento humano plausível em qualquer atendimento real — o cliente seria transferido para um atendente sem ter feito nenhuma pergunta de negócio.
+
+**Por que isso é um problema de produto:** o fallback de contador foi desenhado para capturar perguntas fora do escopo do assistente, não para penalizar conversa social sem conteúdo. Tratar as duas situações da mesma forma gera transferências desnecessárias logo no início do atendimento.
+
+**Abordagens descartadas antes da solução final:**
+
+- **Lista de palavras-chave fixas** (`if pergunta in ['oi', 'ola', ...]`) — falha diante de variações informais de escrita ("oii", "olar", "eae"), pelo mesmo motivo que uma correspondência de texto exata já havia se mostrado frágil no bug do marcador `TRANSFERIR_HUMANO` (Seção 7).
+- **Filtro por tamanho da mensagem** — descartado ao se considerar o contra-exemplo "meu pedido ta atrasado", que tem tamanho comparável a uma saudação estendida, mas é uma pergunta de negócio legítima. Tamanho não correlaciona de forma confiável com a distinção que importa.
+- **Detecção de mensagens fragmentadas ou incompletas** (ex.: cliente envia a mensagem sem querer, no meio de digitar) — considerada, mas não implementada. Diferente de saudação, que segue um padrão finito e reconhecível, um fragmento não tem um conjunto fixo de exemplos comparáveis; julgar se uma frase está "gramaticalmente completa" exige um tipo de julgamento semântico mais próximo do que motivou o uso de LLM no grounding verification (Seção 8), o que reintroduziria custo de chamada por mensagem. Fica documentado como limitação conhecida, não resolvida nesta versão.
+
+**Solução adotada:** uma segunda base vetorial, pequena e independente da base de conhecimento principal, criada a partir de uma lista de exemplos de saudação. A pergunta do cliente é comparada contra essa base antes de qualquer busca no `politicas.txt`; se a similaridade for alta o suficiente, a mensagem é tratada como saudação — respondida com uma mensagem fixa (sem chamar o LLM) e sem contar como tentativa falha.
+
+```python
+def carregar_indice_saudacoes():
+    exemplos_saudacao = ['olá', 'oi', 'oii', 'bom dia', 'boa tarde', 'boa noite', 'tudo bem', 'e aí', 'opa', 'salve']
+    documentos_saudacao = [Document(page_content=texto) for texto in exemplos_saudacao]
+    embeddings = OpenAIEmbeddings()
+    return FAISS.from_documents(documentos_saudacao, embeddings)
+
+def eh_saudacao(vectorstore_saudacoes, pergunta):
+    resultados = vectorstore_saudacoes.similarity_search_with_relevance_scores(pergunta, k=1)
+    _, score = resultados[0]
+    return score >= 0.85
+```
+
+**Por que a checagem precisa vir antes de `buscar_contexto`, e não dentro de `verificar_grounding`:** o `verificar_grounding` só é alcançado após a resposta do LLM já ter sido gerada, dentro do fluxo normal. Como uma saudação gera contexto vazio, ela já é interceptada pelo bloco `if not contexto.strip()` (via `continue`) antes de a execução chegar perto do LLM ou do verificador — qualquer regra colocada dentro de `verificar_grounding` para tratar saudação nunca seria executada para esse caso.
+
+**Por que a resposta à saudação é fixa no código, e não gerada pelo LLM:** mesmo princípio já aplicado ao fallback de "não entendi" (Seção 6) — uma saudação não exige raciocínio, então gerar a resposta via `llm.stream()` seria custo desnecessário para uma tarefa totalmente previsível.
+
+**Calibração do `threshold` (0.85):** o valor inicial de 0.75 foi testado e rejeitado com dado real — "meu pedido ta atrasado" obteve score 0.7657, acima do valor testado, o que classificaria incorretamente uma pergunta de negócio como saudação. Elevando para 0.85, a margem de segurança contra falsos positivos se sustentou em múltiplos testes:
+
+| Frase | Score | Classificação esperada | Resultado |
+|---|---|---|---|
+| "oi" | 1.0000 | Saudação | ✅ |
+| "oie" | 0.9094 | Saudação (variação) | ✅ |
+| "bom diaa" | 0.9569 | Saudação (variação) | ✅ |
+| "hello" | 0.7962 | Saudação | ❌ (abaixo do threshold) |
+| "meu pedido ta atrasado" | 0.7657 | Não-saudação | ✅ |
+| "qual o prazo" | 0.7413 | Não-saudação | ✅ |
+| "oi, meu pedido atrasou" (mensagem mista) | 0.7756 | Não-saudação | ✅ |
+
+**Limitação aceita conscientemente:** com 0.85, saudações em outro idioma ("hello") ou gírias regionais não incluídas na lista de exemplos ficam abaixo do threshold e não são reconhecidas como saudação — o cliente recebe o fallback de "não entendi, pode reformular?" na primeira tentativa. Essa foi uma escolha deliberada: abaixar o threshold para cobrir esses casos reduziria a margem de segurança contra falsos positivos em perguntas de negócio curtas, que é o risco mais custoso dos dois. Quando um caso específico se mostrou relevante o suficiente para justificar tratamento (a gíria "salve", mais comum no contexto brasileiro do que "hello"), a solução adotada foi ampliar a lista de exemplos de referência, não reduzir o threshold — isso resolveu o caso sem comprometer a margem de segurança já validada.
+
+**Teste de ambiguidade semântica:** como a palavra "salve" também pode ser usada como verbo ("salve meu número de rastreamento"), esse cenário foi testado deliberadamente antes de considerar a solução validada. O resultado (score 0.7854, abaixo do threshold) confirmou que o embedding distingue corretamente a interjeição isolada do verbo em contexto de frase — a comparação por similaridade captura a estrutura semântica da frase completa, não apenas a presença da palavra.
+
+**Conclusão:** o mesmo mecanismo de embedding usado para RAG de negócio pode ser reaproveitado, de forma barata, para classificar categorias de mensagem que não são sobre conteúdo de negócio (como small talk) — evitando tanto correspondência de texto frágil (listas fixas) quanto o custo de uma chamada de LLM completa para uma tarefa que não exige julgamento complexo. A calibração do threshold seguiu a mesma metodologia usada em `score_threshold` (Seção 5): testar categorias antagônicas, medir a margem real entre elas, e tratar exceções conhecidas ampliando a base de exemplos em vez de comprometer a margem de segurança já validada.
+
+## 12. Conclusões gerais
 
 - RAG reduz alucinação, mas não a elimina — mesmo com contexto correto recuperado, o modelo pode combinar fatos legítimos de formas não autorizadas pelo negócio.
 - Instruções em linguagem natural no *system prompt* têm um teto de eficácia: proibições, checagens explícitas e restrições literais foram testadas e nenhuma bloqueou o comportamento por completo.
@@ -302,9 +352,12 @@ Vale notar que o segundo aviso passou a ser capturado sem precisar de nenhum fil
 - Grounding verification com uma segunda chamada ao mesmo modelo reduz drasticamente, mas não elimina, alucinação por inferência — porque o verificador herda parte dos vieses do modelo que está verificando. Um modelo mais forte no papel de verificador comprovadamente reduz esse viés, mas a decisão de adotá-lo é uma escolha de custo, não uma correção óbvia.
 - Otimização de performance deve ser guiada por medição, não por sensação: o gargalo percebido nem sempre é o gargalo real, e resolver o problema errado consome tempo sem resultado.
 - Silenciar um aviso técnico e redirecioná-lo para um log são decisões diferentes: a primeira descarta informação, a segunda a preserva para diagnóstico sem expô-la à interface do usuário.
+- Embeddings são úteis além da recuperação de conteúdo de negócio: classificar tipo de mensagem (saudação vs. pergunta real) é uma aplicação barata da mesma técnica, desde que a margem entre categorias seja validada com casos antagônicos reais, não presumida.
 
-## 12. Próximos passos identificados (não implementados ainda)
+## 13. Próximos passos identificados (não implementados ainda)
 
+- **Query rewriting (contextual retrieval):** `buscar_contexto` recebe apenas a pergunta atual, isolada do histórico da conversa — diferente do LLM de geração, que recebe `messages` completo. Em uma sequência como "meu pedido atrasou" seguida de "e já faz 5 dias", a segunda busca vetorial usaria só a frase vaga, sem termos que o embedding relacione bem ao `politicas.txt`, mesmo a pergunta fazendo sentido no contexto da conversa. Resolver isso exigiria uma etapa que reformula a pergunta com base no histórico (ex.: transformar "e já faz 5 dias" em "qual o procedimento para um pedido atrasado há 5 dias?") antes de passá-la ao retriever — tipicamente feito com uma chamada de LLM adicional. **Decisão consciente de não implementar:** essa chamada extra representaria mais um custo de API por mensagem, no mesmo padrão de trade-off já discutido no grounding verification (Seção 8). Dado que o objetivo deste projeto é educacional, e não uma aplicação em produção real, o custo adicional não se justifica aqui — mas em um cenário de produção, com volume real de conversas multi-turno, essa decisão provavelmente seria diferente, já que a limitação afeta a qualidade de resposta em uma conversa genuína, não um caso extremo raro.
+- **Detecção de mensagens fragmentadas ou incompletas:** cenário identificado na Seção 11, mas não implementado por exigir julgamento semântico (provavelmente via LLM), reintroduzindo custo de chamada por mensagem recebida.
 - **Few-shot prompting:** incluir no *system prompt* um exemplo concreto de pergunta ambígua com a resposta correta esperada, em vez de apenas descrever a regra de forma abstrata.
 - **Cobertura de conteúdo:** adicionar uma regra explícita para o cenário de "atraso simples" na base de conhecimento, eliminando a lacuna que hoje força o modelo a inferir.
 - **Eval set mais robusto:** ampliar o conjunto de perguntas de teste usado para calibrar `score_threshold` e o grounding verification, cobrindo mais variações de pergunta específica, difusa e fora do domínio — para determinar se a taxa de falso negativo do verificador `gpt-4o-mini` justifica o custo extra do `gpt-4o` em uso real.

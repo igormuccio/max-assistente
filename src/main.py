@@ -17,6 +17,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.documents import Document
 
 load_dotenv()
 
@@ -63,6 +64,17 @@ def carregar_base_conhecimento():
         search_kwargs={'score_threshold': 0.68, 'k': 4}
     )
 
+def carregar_indice_saudacoes():
+    exemplos_saudacao = ['olá', 'oi', 'oii', 'bom dia', 'boa tarde', 'boa noite', 'tudo bem', 'e aí', 'opa', 'salve']
+    documentos_saudacao = [Document(page_content=texto) for texto in exemplos_saudacao]
+    embeddings = OpenAIEmbeddings()
+    return FAISS.from_documents(documentos_saudacao, embeddings)
+
+def eh_saudacao(vectorstore_saudacoes, pergunta):
+    resultados = vectorstore_saudacoes.similarity_search_with_relevance_scores(pergunta, k=1)
+    _, score = resultados[0]
+    return score >= 0.85
+
 def buscar_contexto(retriever, pergunta):
     docs = retriever.invoke(pergunta)
     return '\n'.join([doc.page_content for doc in docs])
@@ -85,6 +97,7 @@ def main():
     print('Carregando Max...')
     system_prompt = carregar_prompt()
     retriever = carregar_base_conhecimento()
+    vectorstore_saudacoes = carregar_indice_saudacoes()
 
     llm = ChatOpenAI(
         model='gpt-4o-mini',
@@ -102,6 +115,11 @@ def main():
         if pergunta.lower() == 'sair':
             print('Max: Até mais!')
             break
+
+        if eh_saudacao(vectorstore_saudacoes, pergunta):
+            print('Max: Olá! Como posso te ajudar hoje?')
+            print()
+            continue
 
         contexto = buscar_contexto(retriever, pergunta)
 
