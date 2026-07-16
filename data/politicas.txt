@@ -8,6 +8,11 @@ Prazos de entrega:
 - Região Nordeste: 5 a 7 dias úteis
 - Região Norte e Centro-Oeste: 7 a 10 dias úteis
 
+Política de atraso (dentro do prazo):
+- Se o pedido ainda não chegou mas o prazo de entrega da região não foi ultrapassado, é esperado que o pedido ainda esteja a caminho
+- Nenhuma ação é necessária até o fim do prazo estimado
+- Após o prazo da região ser ultrapassado, aplica-se a política de pedido não recebido
+
 Política de reembolso:
 - Prazo para solicitação: até 7 dias após a entrega
 - Reembolso processado em até 5 dias úteis após aprovação
