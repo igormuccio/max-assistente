@@ -58,6 +58,21 @@ Esse cenário — atraso simples, sem extravio — não está coberto explicitam
 
 **Observação posterior (validação cruzada):** após os experimentos do Max, um comportamento semelhante foi observado de forma independente em uma conversa com outro modelo (Claude Sonnet), fora do escopo direto deste projeto. Ao explicar por que a segunda chamada de verificação era "mais barata", o modelo combinou dois fatos reais e documentados (o custo do risco existe; o custo de API é comparativamente menor) para concluir que esse custo seria "desprezível" — uma quantificação que não era sustentada pelas premissas disponíveis. A observação reforça que a inferência por combinação de fatos verdadeiros não parece ser exclusiva do modelo utilizado no Max, tendo sido observada também em outro modelo de capacidade superior. Embora esse episódio isolado não permita generalizações sobre o comportamento de LLMs como um todo, ele é consistente com a hipótese investigada neste projeto: modelos podem produzir respostas plausíveis extrapolando o que está explicitamente fundamentado no contexto.
 
+**Resolução aplicada (cobertura de conteúdo):** a lacuna que originou esse caso específico — ausência de uma regra para "atraso dentro do prazo" — foi fechada adicionando um bloco explícito ao `politicas.txt`:
+
+```
+Política de atraso (dentro do prazo):
+- Se o pedido ainda não chegou mas o prazo de entrega da região não foi ultrapassado, é esperado que o pedido ainda esteja a caminho
+- Nenhuma ação é necessária até o fim do prazo estimado
+- Após o prazo da região ser ultrapassado, aplica-se a política de pedido não recebido
+```
+
+Repetindo a mesma pergunta de teste após a adição, o novo chunk foi recuperado corretamente pelo retriever, e a resposta do Max passou a ser fundamentada no conteúdo real, sem inferência: *"Se o seu pedido ainda não chegou, mas o prazo de entrega não foi ultrapassado, é esperado que ele esteja a caminho. Recomendo que aguarde um pouco mais."*
+
+**Limitação residual observada:** mesmo fundamentada, a resposta permanece genérica ("aguarde um pouco mais"), porque o sistema não coleta nem retém dados específicos do pedido (região, data de compra) durante a conversa — não há como calcular "faltam X dias" sem essa informação. Essa limitação é diferente da alucinação original: aqui o conteúdo está correto e ancorado no contexto, apenas não é personalizado. Fica documentada como próximo passo (Seção 13), ligada ao estudo futuro de `structured output`, não à cobertura de conteúdo em si — cobrir mais regras no `politicas.txt` não resolveria a falta de dado específico do cliente.
+
+**Nota metodológica:** esta resolução ataca apenas o caso específico testado, não o problema estrutural. Grounding verification (Seção 8) continua sendo a única camada que mitiga alucinação por combinação de fatos de forma geral, para lacunas ainda não identificadas ou cobertas.
+
 ## 5. `score_threshold`: filtrando por relevância em vez de um `k` fixo
 
 Como observado na investigação sobre `k` (Seção 3), um `k` fixo sempre retorna o mesmo número de chunks, mesmo quando nem todos são relevantes. A alternativa testada foi o `search_type='similarity_score_threshold'` do LangChain, que descarta qualquer chunk abaixo de um limiar mínimo de relevância, usando `k` apenas como teto máximo.
@@ -362,5 +377,4 @@ def eh_saudacao(vectorstore_saudacoes, pergunta):
 - **Detecção de mensagens fragmentadas ou incompletas:** cenário identificado na Seção 11, mas não implementado por exigir julgamento semântico (provavelmente via LLM), reintroduzindo custo de chamada por mensagem recebida.
 - **Cálculo de prazo restante personalizado (ex.: "falta 1 dia até o pedido entrar em atraso"):** identificado ao testar a nova regra de "atraso dentro do prazo" — a resposta do Max, mesmo fundamentada, é genérica ("aguarde mais um pouco"), porque o sistema não coleta nem retém dados específicos do pedido (região, data de compra) durante a conversa. Resolver isso exigiria o modelo perguntar essas informações e, mais importante, extraí-las de forma estruturada (não só texto livre) para permitir um cálculo real de data. Não implementado agora por abrir escopo novo (extração estruturada + lógica de cálculo), fora do que uma regra de conteúdo ou prompt resolveria sozinho. Fica planejado para quando `structured output` (Pydantic, JSON mode) for estudado, conforme o roadmap de estudos.
 - **Few-shot prompting:** incluir no *system prompt* um exemplo concreto de pergunta ambígua com a resposta correta esperada, em vez de apenas descrever a regra de forma abstrata.
-- **Cobertura de conteúdo:** adicionar uma regra explícita para o cenário de "atraso simples" na base de conhecimento, eliminando a lacuna que hoje força o modelo a inferir.
 - **Eval set mais robusto:** ampliar o conjunto de perguntas de teste usado para calibrar `score_threshold` e o grounding verification, cobrindo mais variações de pergunta específica, difusa e fora do domínio — para determinar se a taxa de falso negativo do verificador `gpt-4o-mini` justifica o custo extra do `gpt-4o` em uso real.
