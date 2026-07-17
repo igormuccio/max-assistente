@@ -2,3 +2,4 @@
 data/faiss_index/
 data/faiss_metadata.txt
 logs/
+__pycache__/

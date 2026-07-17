@@ -15,8 +15,9 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [9. Persistência do índice FAISS: eliminando reprocessamento desnecessário](#9-persistência-do-índice-faiss-eliminando-reprocessamento-desnecessário)
 - [10. Separando logs técnicos da interface do usuário](#10-separando-logs-técnicos-da-interface-do-usuário)
 - [11. Detecção de saudação: evitando penalizar small talk](#11-detecção-de-saudação-evitando-penalizar-small-talk)
-- [12. Conclusões gerais](#12-conclusões-gerais)
-- [13. Próximos passos identificados](#13-próximos-passos-identificados-não-implementados-ainda)
+- [12. Separação de responsabilidades: reorganizando `main.py` em módulos](#12-separação-de-responsabilidades-reorganizando-mainpy-em-módulos)
+- [13. Conclusões gerais](#13-conclusões-gerais)
+- [14. Próximos passos identificados](#14-próximos-passos-identificados-não-implementados-ainda)
 
 ## 1. Por que RAG neste projeto
 
@@ -358,7 +359,24 @@ def eh_saudacao(vectorstore_saudacoes, pergunta):
 
 **Conclusão:** o mesmo mecanismo de embedding usado para RAG de negócio pode ser reaproveitado, de forma barata, para classificar categorias de mensagem que não são sobre conteúdo de negócio (como small talk) — evitando tanto correspondência de texto frágil (listas fixas) quanto o custo de uma chamada de LLM completa para uma tarefa que não exige julgamento complexo. A calibração do threshold seguiu a mesma metodologia usada em `score_threshold` (Seção 5): testar categorias antagônicas, medir a margem real entre elas, e tratar exceções conhecidas ampliando a base de exemplos em vez de comprometer a margem de segurança já validada.
 
-## 12. Conclusões gerais
+## 12. Separação de responsabilidades: reorganizando `main.py` em módulos
+
+Com a adição de persistência, grounding verification e detecção de saudação, `main.py` acumulou seis funções de propósitos distintos além do próprio loop de conversa — carregamento de prompt, carregamento e persistência da base de conhecimento, carregamento do índice de saudação, busca de contexto, detecção de saudação e verificação de grounding. Testar novas funcionalidades (como um eval set automatizado) sobre esse arquivo único tornaria a leitura progressivamente mais difícil.
+
+**Critério usado para dividir:** não foi "uma função por arquivo", nem apenas "o que usa o quê" — o critério foi agrupar funções que compartilham o mesmo domínio do problema e o mesmo momento de execução no fluxo.
+
+- **`inicializacao.py`** — `carregar_prompt`, `carregar_base_conhecimento`, `carregar_indice_saudacoes`. Todas rodam uma única vez, antes do loop de conversa começar, preparando recursos que serão reutilizados.
+- **`busca_semantica.py`** — `buscar_contexto`, `eh_saudacao`. Rodam a cada mensagem do cliente; ambas fazem o mesmo tipo de operação (comparação de embedding contra um vectorstore), apenas contra bases diferentes.
+- **`verificacao_llm.py`** — `verificar_grounding`. Também roda a cada mensagem, mas por um mecanismo distinto: julgamento via chamada ao LLM, não busca vetorial. Separado das funções de busca semântica mesmo rodando na mesma etapa do fluxo, porque o tipo de operação é fundamentalmente diferente.
+- **`main.py`** — a função `main()`, o loop de conversa, e a configuração de logging. A configuração de logging foi mantida aqui, não extraída para um arquivo próprio: hoje é pequena o suficiente (5 linhas) para não prejudicar a leitura, mas é candidata natural a um módulo separado se passar a registrar eventos proativos do próprio código, além dos avisos de biblioteca que captura hoje.
+
+**Regra de import entre arquivos de um mesmo projeto:** cada arquivo precisa dos próprios imports das bibliotecas que usa para *criar* objetos (`ChatOpenAI(...)`, `FAISS.from_documents(...)`, `Document(...)`) — não existe herança de import entre arquivos Python. Uma função que apenas *usa* um objeto já pronto, recebido como parâmetro (ex.: `llm.invoke(...)`, `vectorstore.similarity_search(...)`), não precisa importar a classe daquele objeto — só precisa que ele já tenha sido criado em algum lugar antes de chegar até ali. Por esse motivo, `busca_semantica.py` e `verificacao_llm.py` não têm nenhum import de LangChain: as funções neles só chamam métodos de objetos que `inicializacao.py` e `main.py` já criaram.
+
+**Consequência colateral observada:** a primeira execução após a reorganização gerou uma pasta `__pycache__/` dentro de `src/` — comportamento automático do Python ao importar módulos locais pela primeira vez (compila cada arquivo importado para bytecode e armazena em cache, para acelerar execuções futuras se o arquivo não mudar). Adicionada ao `.gitignore` pelo mesmo motivo que `faiss_index/` e `logs/`: artefato gerado, regenerável, sem valor de código-fonte.
+
+**Conclusão:** dividir por domínio do problema e momento de execução, em vez de por tamanho de arquivo ou ordem de criação, produziu uma estrutura onde cada módulo pode ser lido (e futuramente testado) de forma isolada. Isso também deixou mais explícito um limite que já existia implicitamente no código: funções de busca semântica e de verificação via LLM têm custos e mecanismos de falha diferentes (Seções 5 e 8), e agora vivem em arquivos diferentes que refletem essa diferença.
+
+## 13. Conclusões gerais
 
 - RAG reduz alucinação, mas não a elimina — mesmo com contexto correto recuperado, o modelo pode combinar fatos legítimos de formas não autorizadas pelo negócio.
 - Instruções em linguagem natural no *system prompt* têm um teto de eficácia: proibições, checagens explícitas e restrições literais foram testadas e nenhuma bloqueou o comportamento por completo.
@@ -370,8 +388,9 @@ def eh_saudacao(vectorstore_saudacoes, pergunta):
 - Otimização de performance deve ser guiada por medição, não por sensação: o gargalo percebido nem sempre é o gargalo real, e resolver o problema errado consome tempo sem resultado.
 - Silenciar um aviso técnico e redirecioná-lo para um log são decisões diferentes: a primeira descarta informação, a segunda a preserva para diagnóstico sem expô-la à interface do usuário.
 - Embeddings são úteis além da recuperação de conteúdo de negócio: classificar tipo de mensagem (saudação vs. pergunta real) é uma aplicação barata da mesma técnica, desde que a margem entre categorias seja validada com casos antagônicos reais, não presumida.
+- Separar código por domínio do problema e momento de execução — não por tamanho de arquivo — facilita leitura e testagem isolada; funções que apenas usam um objeto já criado não precisam reimportar a biblioteca que o originou.
 
-## 13. Próximos passos identificados (não implementados ainda)
+## 14. Próximos passos identificados (não implementados ainda)
 
 Ordenados pela sequência de cobertura planejada, não pela ordem de descoberta.
 

@@ -70,15 +70,22 @@ Quando o cliente solicitar falar com um atendente ou o assistente não conseguir
 ```
 max-assistente/
 ├── data/
-│   └── politicas.txt       # Base de conhecimento da empresa
+│   ├── politicas.txt         # Base de conhecimento da empresa
+│   ├── faiss_index/          # Índice vetorial persistido (gerado, ignorado no Git)
+│   └── faiss_metadata.txt    # Controle de atualização do índice (gerado, ignorado no Git)
+├── logs/
+│   └── app.log                # Log técnico separado da interface do usuário (gerado, ignorado no Git)
 ├── prompts/
-│   └── system.txt          # Personalidade e regras do assistente
+│   └── system.txt             # Personalidade e regras do assistente
 ├── src/
-│   └── main.py              # Código principal
-├── .env.example             # Exemplo de variáveis de ambiente
+│   ├── main.py                 # Orquestração e loop de conversa
+│   ├── inicializacao.py        # Carregamento de prompt, base de conhecimento e índice de saudação
+│   ├── busca_semantica.py      # Busca de contexto e detecção de saudação por embedding
+│   └── verificacao_llm.py      # Verificação de grounding (checagem de fundamentação da resposta)
+├── .env.example                # Exemplo de variáveis de ambiente
 ├── .gitignore
 ├── requirements.txt
-├── EXPERIMENTS.md           # Documentação de testes e decisões técnicas
+├── EXPERIMENTS.md              # Documentação de testes e decisões técnicas
 └── README.md
 ```
 
@@ -131,11 +138,10 @@ Documentei esse processo, com exemplos e conclusões, em [EXPERIMENTS.md](./EXPE
 
 ## Melhorias futuras
 
-- Persistência do índice FAISS em disco
 - Interface Web com Streamlit
 - API REST utilizando FastAPI
 - Banco vetorial dedicado (Chroma ou Pinecone)
-- Testes automatizados
+- Testes automatizados (eval set formal)
 - Docker para facilitar o deploy
 
 ## Observações
