@@ -41,7 +41,6 @@ flowchart TD
         A --> B[Carrega Prompt do Sistema]
         A --> C[Carrega Base de Conhecimento]
         A --> D[Carrega ou Cria Índice Vetorial]
-        A --> E[Sistema pronto]
     end
 
     %% Fluxo principal
