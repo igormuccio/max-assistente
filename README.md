@@ -34,12 +34,45 @@ Max: Aguarde, vou transferir para um atendente.
 
 ```mermaid
 flowchart TD
-    A[Usuário] --> B[Prompt do Sistema]
-    B --> C[Consulta RAG]
-    C --> D[FAISS - Busca Vetorial]
-    D --> E[Documentos Relevantes]
-    E --> F[GPT-4o Mini]
-    F --> G[Resposta em Streaming]
+
+    %% Inicialização
+    subgraph Inicialização
+        A[inicializacao.py]
+        A --> B[Carrega Prompt do Sistema]
+        A --> C[Carrega Base de Conhecimento]
+        A --> D[Carrega ou Cria Índice Vetorial]
+        A --> E[Sistema pronto]
+    end
+
+    %% Fluxo principal
+    U[Usuário] --> M[main.py]
+
+    M --> S{É saudação?}
+
+    S -- Sim --> G[Resposta de saudação]
+    G --> U
+
+    S -- Não --> R[busca_semantica.py]
+
+    R --> T{Contexto encontrado?}
+
+    T -- Não --> V[Solicita mais detalhes ao usuário]
+
+    V --> F{Primeira tentativa?}
+
+    F -- Sim --> U
+    F -- Não --> X[Transferência para atendente]
+
+    T -- Sim --> L[LLM]
+
+    L --> W[verificacao_llm.py]
+
+    W --> Y{Resposta fundamentada?}
+
+    Y -- Sim --> Z[Resposta exibida]
+    Z --> U
+
+    Y -- Não --> X
 ```
 
 ## Como funciona
