@@ -9,12 +9,17 @@ Projeto desenvolvido para estudo de aplicações de IA utilizando Large Language
 
 Assistente de atendimento ao cliente que responde com base nas políticas reais da empresa, transfere automaticamente para atendentes humanos quando necessário e mantém contexto durante toda a conversa.
 
+> Além do código-fonte, este projeto documenta os experimentos realizados durante o desenvolvimento — incluindo falhas, hipóteses testadas e decisões arquiteturais recalibradas com dado real. Veja [EXPERIMENTS.md](./EXPERIMENTS.md).
+
 ## Objetivo
 
-Desenvolver um assistente virtual baseado em LLMs capaz de responder dúvidas de clientes utilizando Retrieval-Augmented Generation (RAG), simulando um cenário real de atendimento ao cliente.
+Desenvolver um assistente virtual de atendimento ao cliente baseado em LLMs e Retrieval-Augmented Generation (RAG), com foco não apenas em fazer o sistema funcionar, mas em entender os limites reais de cada decisão de arquitetura — calibração de parâmetros com dado real, mitigação de alucinação, trade-offs de custo e confiabilidade, e organização de código sustentável.
+
+O projeto simula um cenário real de atendimento (a XYZ Entregas, empresa fictícia). Boa parte do valor deste repositório está no processo de investigação por trás de cada escolha técnica — documentado em [EXPERIMENTS.md](./EXPERIMENTS.md).
 
 ## Exemplo de conversa
 
+**Fluxo padrão — pergunta de negócio com contexto encontrado:**
 ```
 Max: Olá! Sou o Max, assistente da XYZ Entregas. Como posso ajudar?
 
@@ -30,69 +35,88 @@ Max: Aguarde, vou transferir para um atendente.
 [Sistema]: Transferindo...
 ```
 
+**Fluxo de saudação — resposta fixa, sem custo de chamada ao modelo:**
+```
+Você: oii
+
+Max: Olá! Como posso te ajudar hoje?
+```
+
+**Fluxo de contexto não encontrado — reformulação antes de transferir:**
+```
+Você: qual o horário do próximo jogo do brasileirão
+
+Max: Não entendi muito bem sua pergunta. Você pode explicar de outra
+forma, com mais detalhes sobre seu pedido?
+```
+
 ## Arquitetura
 
 ```mermaid
 flowchart TD
+    Usuario[Usuário]
+    mainpy[main.py]
 
-    %% Inicialização
-    subgraph Inicialização
-        A[inicializacao.py]
-        A --> B[Carrega Prompt do Sistema]
-        A --> C[Carrega Base de Conhecimento]
-        A --> D[Carrega ou Cria Índice Vetorial]
+    subgraph Inicializacao [Inicialização]
+        inicializacaopy[inicializacao.py] --> CarregaPrompt[Carrega Prompt do Sistema]
+        inicializacaopy --> CarregaBase[Carrega Base de Conhecimento]
+        inicializacaopy --> CarregaIndice[Carrega ou Cria Índice Vetorial]
     end
 
-    %% Fluxo principal
-    U[Usuário] --> M[main.py]
+    Inicializacao --> mainpy
+    Usuario --> mainpy
+    mainpy --> Saudacao{É saudação?}
 
-    M --> S{É saudação?}
+    Saudacao -->|Sim| RespostaSaudacao[Resposta de saudação]
+    RespostaSaudacao --> Usuario
 
-    S -- Sim --> G[Resposta de saudação]
-    G --> U
+    Saudacao -->|Não| buscapy[busca_semantica.py]
+    buscapy --> ContextoEncontrado{Contexto encontrado?}
 
-    S -- Não --> R[busca_semantica.py]
+    ContextoEncontrado -->|Não| SolicitaDetalhes[Solicita mais detalhes ao usuário]
+    SolicitaDetalhes --> PrimeiraTentativa{Primeira tentativa?}
+    PrimeiraTentativa -->|Sim| Usuario
+    PrimeiraTentativa -->|Não| Transferencia[Transferência para atendente]
 
-    R --> T{Contexto encontrado?}
+    ContextoEncontrado -->|Sim| LLM[LLM]
+    LLM --> MarcadorTransferencia{Contém marcador de transferência?}
+    MarcadorTransferencia -->|Sim| Transferencia
+    MarcadorTransferencia -->|Não| verificacaopy[verificacao_llm.py]
 
-    T -- Não --> V[Solicita mais detalhes ao usuário]
-
-    V --> F{Primeira tentativa?}
-
-    F -- Sim --> U
-    F -- Não --> X[Transferência para atendente]
-
-    T -- Sim --> L[LLM]
-
-    L --> W[verificacao_llm.py]
-
-    W --> Y{Resposta fundamentada?}
-
-    Y -- Sim --> Z[Resposta exibida]
-    Z --> U
-
-    Y -- Não --> X
+    verificacaopy --> RespostaFundamentada{Resposta fundamentada?}
+    RespostaFundamentada -->|Não| Transferencia
+    RespostaFundamentada -->|Sim| RespostaExibida[Resposta exibida ao usuário]
+    RespostaExibida --> Usuario
 ```
 
 ## Como funciona
 
-Para cada pergunta do usuário, o sistema gera embeddings da consulta e realiza uma busca vetorial utilizando FAISS. Os documentos mais relevantes são recuperados e inseridos no contexto enviado ao GPT-4o Mini, permitindo respostas fundamentadas na base de conhecimento da empresa — não no conhecimento genérico do modelo.
+Antes de qualquer busca, o Max verifica se a mensagem é uma saudação — usando o mesmo mecanismo de embedding do RAG, mas contra uma base pequena de exemplos, sem gastar chamada ao modelo de linguagem para isso.
 
-Quando o cliente solicitar falar com um atendente ou o assistente não conseguir resolver o problema, a conversa é encerrada e sinalizada para transferência humana.
+Para perguntas de negócio, o sistema gera embeddings da consulta e realiza uma busca vetorial utilizando FAISS, com um limiar de relevância mínimo (`score_threshold`). Se nenhum chunk for relevante o suficiente, o Max pede para o cliente reformular; se isso se repetir, a conversa é transferida para um atendente, sem gastar uma chamada de geração em uma pergunta sem contexto útil.
+
+Quando contexto relevante é encontrado, ele é inserido no prompt enviado ao GPT-4o Mini, permitindo respostas fundamentadas na base de conhecimento da empresa — não no conhecimento genérico do modelo. Antes de exibir a resposta, uma segunda chamada ao modelo verifica se ela usa apenas informação presente no contexto (*grounding verification*); se a resposta contiver uma inferência não fundamentada, ela é descartada e a conversa é transferida para um atendente humano, em vez de mostrada ao cliente.
+
+O índice vetorial é persistido em disco e só é recalculado quando a base de conhecimento (`politicas.txt`) é alterada, evitando reprocessamento desnecessário a cada execução.
 
 ## Funcionalidades
 
 - Atendimento automatizado sobre problemas de entrega
-- Respostas baseadas nas políticas da empresa via RAG
+- Detecção de saudação via embedding, sem custo de chamada ao modelo
+- Respostas baseadas nas políticas da empresa via RAG, com limiar de relevância calibrado
+- Verificação de grounding: uma segunda checagem que descarta respostas não fundamentadas no contexto
+- Fallback de reformulação antes de transferir, para perguntas fora do escopo
 - Transferência automática para atendente humano quando necessário
+- Persistência do índice vetorial em disco, recalculado apenas quando a base muda
 - Streaming de respostas em tempo real
 - Histórico de conversa durante a sessão
+- Log técnico separado da interface do usuário
 
 ## Tecnologias
 
 - Python 3.10+
-- LangChain
-- OpenAI API / GPT-4o Mini
+- LangChain (core, text-splitters, community, openai)
+- OpenAI API (GPT-4o Mini)
 - OpenAI Embeddings
 - FAISS (banco de vetores)
 - python-dotenv
@@ -152,28 +176,24 @@ cp .env.example .env
 python src/main.py
 ```
 
-## O que explorei neste projeto
+## O que este projeto explora
 
-- Prompt Engineering para controle do comportamento do modelo
-- Integração de um pipeline RAG utilizando LangChain
-- Uso de embeddings com OpenAI
-- Busca vetorial utilizando FAISS
-- Gerenciamento de contexto de conversa
-- Streaming de respostas com LangChain
-- Organização de projetos Python
+- Prompt engineering para controle de comportamento, incluindo marcadores de controle e mitigação de regras concorrentes
+- Pipeline RAG completo: chunking calibrado, embeddings, busca vetorial com FAISS, limiar de relevância
+- Detecção de alucinação e verificação de grounding como camada de segurança
+- Trade-offs de custo vs. confiabilidade na escolha de modelo e arquitetura
+- Persistência de índice vetorial e separação de logs técnicos
+- Organização de projeto em módulos por responsabilidade
 
-## Testes e decisões técnicas
-
-Além de implementar o pipeline, testei na prática os limites de algumas decisões de RAG — como o `chunk_size` afeta a granularidade das respostas, como o parâmetro `k` do retriever interage com o tamanho da base de conhecimento, e até onde prompt engineering consegue evitar que o modelo combine informações reais de forma não autorizada.
-
-Documentei esse processo, com exemplos e conclusões, em [EXPERIMENTS.md](./EXPERIMENTS.md).
+Cada uma dessas decisões foi testada empiricamente, não apenas assumida — incluindo casos em que a primeira solução falhou e precisou ser recalibrada. Para o histórico completo de testes, hipóteses e limitações conhecidas, veja [EXPERIMENTS.md](./EXPERIMENTS.md).
 
 ## Melhorias futuras
 
+- Eval set automatizado e few-shot prompting, informados pelos casos já mapeados
+- Query rewriting ou HyDE para conversas multi-turno, a avaliar com uma base de conhecimento maior
 - Interface Web com Streamlit
 - API REST utilizando FastAPI
 - Banco vetorial dedicado (Chroma ou Pinecone)
-- Testes automatizados (eval set formal)
 - Docker para facilitar o deploy
 
 ## Observações
