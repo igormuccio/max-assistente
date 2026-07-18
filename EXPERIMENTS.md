@@ -14,7 +14,7 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [8. Grounding verification: bloqueando inferências não fundamentadas](#8-grounding-verification-bloqueando-inferências-não-fundamentadas)
 - [9. Persistência do índice FAISS: eliminando reprocessamento desnecessário](#9-persistência-do-índice-faiss-eliminando-reprocessamento-desnecessário)
 - [10. Separando logs técnicos da interface do usuário](#10-separando-logs-técnicos-da-interface-do-usuário)
-- [11. Detecção de saudação: evitando penalizar small talk](#11-detecção-de-saudação-evitando-penalizar-small-talk)
+- [11. Detecção de saudação: evitando penalizar transferência por conversa social](#11-detecção-de-saudação-evitando-penalizar-transferência-por-conversa-social)
 - [12. Separação de responsabilidades: reorganizando `main.py` em módulos](#12-separação-de-responsabilidades-reorganizando-mainpy-em-módulos)
 - [13. Conclusões gerais](#13-conclusões-gerais)
 - [14. Próximos passos identificados](#14-próximos-passos-identificados-não-implementados-ainda)
@@ -310,7 +310,7 @@ Vale notar que o segundo aviso passou a ser capturado sem precisar de nenhum fil
 
 **Conclusão:** existe uma diferença prática entre "silenciar" e "redirecionar" um aviso técnico. Descartar é apropriado quando a mensagem é comprovadamente irrelevante; redirecionar para um log é mais apropriado quando a mensagem pode ter valor de diagnóstico futuro, mesmo não sendo destinada ao usuário final. Separar canais de saída — interface do usuário via `print()`, diagnóstico técnico via `logging` em arquivo — é uma prática comum em aplicações reais, especialmente à medida que um projeto de terminal evolui para algo servido como aplicação (API, interface web).
 
-## 11. Detecção de saudação: evitando penalizar small talk
+## 11. Detecção de saudação: evitando penalizar transferência por conversa social
 
 Testando o fluxo manualmente, foi observado que uma saudação simples ("ola") gerava contexto vazio na busca (nenhum chunk do `politicas.txt` é relevante para um cumprimento) e disparava o contador `tentativas_sem_contexto` da mesma forma que uma pergunta genuinamente fora do domínio. Em uma sequência de duas saudações seguidas — comportamento humano plausível em qualquer atendimento real — o cliente seria transferido para um atendente sem ter feito nenhuma pergunta de negócio.
 
@@ -355,9 +355,11 @@ def eh_saudacao(vectorstore_saudacoes, pergunta):
 
 **Limitação aceita conscientemente:** com 0.85, saudações em outro idioma ("hello") ou gírias regionais não incluídas na lista de exemplos ficam abaixo do threshold e não são reconhecidas como saudação — o cliente recebe o fallback de "não entendi, pode reformular?" na primeira tentativa. Essa foi uma escolha deliberada: abaixar o threshold para cobrir esses casos reduziria a margem de segurança contra falsos positivos em perguntas de negócio curtas, que é o risco mais custoso dos dois. Quando um caso específico se mostrou relevante o suficiente para justificar tratamento (a gíria "salve", mais comum no contexto brasileiro do que "hello"), a solução adotada foi ampliar a lista de exemplos de referência, não reduzir o threshold — isso resolveu o caso sem comprometer a margem de segurança já validada.
 
+**Limitação de escopo — saudação, não small talk completo:** o mecanismo cobre apenas cumprimentos ("oi", "bom dia", "salve"), não a categoria mais ampla de small talk usada em sistemas de diálogo (que também inclui despedidas, agradecimentos e perguntas de cortesia como "tudo bem?" fora do contexto de abertura). Ampliar a lista de exemplos manualmente para cobrir cada variação teria retorno decrescente — sempre existiriam casos não previstos. A alternativa mais robusta seria um LLM julgando se a mensagem é social ou tem intenção de negócio, mas isso reintroduziria uma chamada de API por mensagem para resolver um risco de baixo custo: uma mensagem social não reconhecida apenas aciona o fallback de "pode reformular?" (Seção 6), não gera informação incorreta. Mesmo critério de custo vs. risco já aplicado à fragmentação (acima) e ao query rewriting (Seção 13): a chamada extra se justifica quando o erro não tratado é caro (alucinação), não quando é um pequeno atrito de UX.
+
 **Teste de ambiguidade semântica:** como a palavra "salve" também pode ser usada como verbo ("salve meu número de rastreamento"), esse cenário foi testado deliberadamente antes de considerar a solução validada. O resultado (score 0.7854, abaixo do threshold) confirmou que o embedding distingue corretamente a interjeição isolada do verbo em contexto de frase — a comparação por similaridade captura a estrutura semântica da frase completa, não apenas a presença da palavra.
 
-**Conclusão:** o mesmo mecanismo de embedding usado para RAG de negócio pode ser reaproveitado, de forma barata, para classificar categorias de mensagem que não são sobre conteúdo de negócio (como small talk) — evitando tanto correspondência de texto frágil (listas fixas) quanto o custo de uma chamada de LLM completa para uma tarefa que não exige julgamento complexo. A calibração do threshold seguiu a mesma metodologia usada em `score_threshold` (Seção 5): testar categorias antagônicas, medir a margem real entre elas, e tratar exceções conhecidas ampliando a base de exemplos em vez de comprometer a margem de segurança já validada.
+**Conclusão:** o mesmo mecanismo de embedding usado para RAG de negócio pode ser reaproveitado, de forma barata, para classificar categorias de mensagem que não são sobre conteúdo de negócio (como saudações) — evitando tanto correspondência de texto frágil (listas fixas) quanto o custo de uma chamada de LLM completa para uma tarefa que não exige julgamento complexo. A calibração do threshold seguiu a mesma metodologia usada em `score_threshold` (Seção 5): testar categorias antagônicas, medir a margem real entre elas, e tratar exceções conhecidas ampliando a base de exemplos em vez de comprometer a margem de segurança já validada.
 
 ## 12. Separação de responsabilidades: reorganizando `main.py` em módulos
 
