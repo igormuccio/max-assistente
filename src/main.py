@@ -1,10 +1,6 @@
 import os
 import logging
 
-from inicializacao import carregar_prompt, carregar_base_conhecimento, carregar_indice_saudacoes
-from busca_semantica import buscar_contexto, eh_saudacao
-from verificacao_llm import verificar_grounding
-
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.makedirs(os.path.join(BASE_DIR, 'logs'), exist_ok=True)
 
@@ -15,6 +11,9 @@ logging.basicConfig(
 )
 logging.captureWarnings(True)
 
+from inicializacao import carregar_prompt, carregar_base_conhecimento, carregar_indice_saudacoes
+from busca_semantica import buscar_contexto, eh_saudacao
+from verificacao_llm import verificar_grounding
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
