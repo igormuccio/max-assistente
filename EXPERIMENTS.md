@@ -46,7 +46,7 @@ O Max responde perguntas sobre políticas de uma empresa fictícia de entregas. 
 
 **Nota:** o `k=2` foi usado aqui apenas como teste de diagnóstico, não como configuração final — o objetivo era tornar visível o efeito da fragmentação que `k=4` estava mascarando. Esse experimento evidenciou as limitações de depender só de um número fixo de documentos, motivando a adoção de um `score_threshold` (limiar de similaridade), descrito na seção seguinte.
 
-## 4. Alucinação por combinação de fatos legítimos
+## 4. Inferência não fundamentada por ausência de cobertura na base de conhecimento
 
 **Pergunta de teste:**
 > "Meu pedido está atrasado só um pouco, ainda não chegou mas também não sumiu, o que eu faço?"
