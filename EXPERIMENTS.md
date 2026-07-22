@@ -50,7 +50,7 @@ O Max responde perguntas sobre políticas de uma empresa fictícia de entregas. 
 
 Pergunta de teste:
 
-"Meu pedido está atrasado só um pouco, ainda não chegou mas também não sumiu, o que eu faço?"
+> "Meu pedido está atrasado só um pouco, ainda não chegou mas também não sumiu, o que eu faço?"
 
 No momento desse experimento, esse cenário — atraso simples, sem extravio — ainda não estava coberto explicitamente na base de conhecimento, que só definia regras para "extravio" e para "pedido que consta como entregue mas não recebido".
 
