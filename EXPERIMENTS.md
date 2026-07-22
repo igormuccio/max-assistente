@@ -51,7 +51,7 @@ O Max responde perguntas sobre políticas de uma empresa fictícia de entregas. 
 **Pergunta de teste:**
 > "Meu pedido está atrasado só um pouco, ainda não chegou mas também não sumiu, o que eu faço?"
 
-Esse cenário — atraso simples, sem extravio — não está coberto explicitamente na base de conhecimento, que só define regras para "extravio" e para "pedido que consta como entregue mas não recebido".
+No momento desse experimento, esse cenário — atraso simples, sem extravio — ainda não estava coberto explicitamente na base de conhecimento, que só definia regras para 'extravio' e para 'pedido que consta como entregue mas não recebido'.
 
 **Resultado:** o modelo combinou dois fatos reais (prazos de entrega por região + regra de pedido não recebido) para gerar uma recomendação plausível ("aguarde mais um pouco"), que não está escrita em nenhum lugar da base. Isso persistiu através de três formulações diferentes de instrução no *system prompt* — proibição direta, checagem explícita de "posso responder isso?", e restrição literal contra combinar informações de contextos diferentes — e também com `temperature=0`.
 
