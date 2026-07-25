@@ -13,7 +13,7 @@ logging.captureWarnings(True)
 
 from inicializacao import carregar_prompt, carregar_base_conhecimento, carregar_indice_saudacoes
 from busca_semantica import buscar_contexto, eh_saudacao
-from verificacao_llm import verificar_grounding
+from verificacao_llm import verificar_grounding, verificar_informacao_suficiente
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -26,10 +26,15 @@ def main():
     retriever = carregar_base_conhecimento()
     vectorstore_saudacoes = carregar_indice_saudacoes()
 
-    llm = ChatOpenAI(
+    llm_chat = ChatOpenAI(
         model='gpt-4o-mini',
         temperature=0.3,
         streaming=True
+    )
+
+    llm_verificador = ChatOpenAI(
+        model='gpt-4o-mini',
+        temperature=0
     )
 
     messages = [SystemMessage(content=system_prompt)]
@@ -45,6 +50,11 @@ def main():
 
         if eh_saudacao(vectorstore_saudacoes, pergunta):
             print('Max: Olá! Como posso te ajudar hoje?')
+            print()
+            continue
+
+        if verificar_informacao_suficiente(llm_verificador, pergunta):
+            print('Max: Para te ajudar melhor, preciso de mais alguns detalhes. Você pode informar sua região e, se possível, há quantos dias fez o pedido?')
             print()
             continue
 
@@ -69,17 +79,19 @@ def main():
 
         print('Max: ', end='', flush=True)
         reply = ''
-        for chunk in llm.stream(messages):
+        for chunk in llm_chat.stream(messages):
             texto = chunk.content
             if texto:
                 reply += texto
+
+        print(f"\n[DEBUG] Resposta bruta antes da verificação: {reply}")
 
         if 'TRANSFER_HUMANO' in reply.upper():
             print('Aguarde, vou transferir para um atendente.')
             print('[Sistema]: Transferindo...')
             break
 
-        grounding_falhou = verificar_grounding(llm, contexto, reply)
+        grounding_falhou = verificar_grounding(llm_verificador, pergunta, contexto, reply)
 
         if grounding_falhou:
             print('Max: Não tenho essa informação específica no momento, vou te transferir para um atendente humano que pode te ajudar melhor.')

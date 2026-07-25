@@ -2,7 +2,6 @@ import os
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -10,6 +9,10 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def carregar_prompt():
     with open(os.path.join(BASE_DIR, 'prompts', 'system.txt'), 'r', encoding='utf-8') as f:
         return f.read()
+
+def dividir_por_secao(texto):
+    blocos = texto.split('\n\n')
+    return [bloco.strip() for bloco in blocos if bloco.strip()]
 
 def carregar_base_conhecimento():
     caminho_politicas = os.path.join(BASE_DIR, 'data', 'politicas.txt')
@@ -35,10 +38,17 @@ def carregar_base_conhecimento():
             )
 
     print('Recalculando embeddings...')
-    loader = TextLoader(caminho_politicas, encoding='utf-8')
-    documentos = loader.load()
-    splitter = RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=20)
-    chunks = splitter.split_documents(documentos)
+    with open(caminho_politicas, 'r', encoding='utf-8') as f:
+        texto_completo = f.read()
+
+    secoes = dividir_por_secao(texto_completo)
+
+    print(f"\n===== {len(secoes)} SEÇÕES CRIADAS =====")
+    for i, secao in enumerate(secoes, start=1):
+        print(f"\n--- Seção {i} | {len(secao)} caracteres ---")
+        print(secao)
+
+    chunks = [Document(page_content=secao) for secao in secoes]
     vectorstore = FAISS.from_documents(chunks, embeddings)
 
     vectorstore.save_local(caminho_indice)
