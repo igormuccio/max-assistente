@@ -56,7 +56,7 @@ def avaliar_grounding_should_fail(pergunta, retriever, llm_chat, llm_verificador
     if 'TRANSFER_HUMANO' in reply.upper():
         return True  # equivalente a bloqueio, mesmo resultado final para o usuário
 
-    return verificar_grounding(llm_verificador, contexto, reply)
+    return verificar_grounding(llm_verificador, pergunta, contexto, reply)
 
 
 # Mapa: nome do campo em "checks" -> função que sabe avaliá-lo.

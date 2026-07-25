@@ -118,5 +118,10 @@
     "pergunta": "meu pedido foi extraviado, o que eu faço?",
     "checks": { "needs_more_information": false },
     "limitacao_conhecida": false
-  }
+  },
+  {
+  "pergunta": "meu pedido chegou amassado, posso trocar por outro produto de valor maior pagando a diferença?",
+  "checks": { "needs_more_information": false },
+  "limitacao_conhecida": true
+}
 ]
