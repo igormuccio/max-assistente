@@ -15,9 +15,11 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [9. Persistência do índice FAISS: eliminando reprocessamento desnecessário](#9-persistência-do-índice-faiss-eliminando-reprocessamento-desnecessário)
 - [10. Separando logs técnicos da interface do usuário](#10-separando-logs-técnicos-da-interface-do-usuário)
 - [11. Detecção de saudação: evitando penalizar transferência por conversa social](#11-detecção-de-saudação-evitando-penalizar-transferência-por-conversa-social)
-- [12. Separação de responsabilidades: reorganizando `main.py` em módulos](#12-separação-de-responsabilidades-reorganizando-mainpy-em-módulos)
-- [13. Conclusões gerais](#13-conclusões-gerais)
-- [14. Próximos passos identificados](#14-próximos-passos-identificados-não-implementados-ainda)
+- [12. Ambiguidade entre políticas semanticamente próximas: chunking, retrieval e geração](#12-ambiguidade-entre-políticas-semanticamente-próximas-chunking-retrieval-e-geração)
+- [13. Eval set automatizado: da validação manual a um script reproduzível](#13-eval-set-automatizado-da-validação-manual-a-um-script-reproduzível)
+- [14. Separação de responsabilidades: reorganizando `main.py` em módulos](#14-separação-de-responsabilidades-reorganizando-mainpy-em-módulos)
+- [15. Conclusões gerais](#15-conclusões-gerais)
+- [16. Próximos passos identificados (não implementados ainda)](#16-próximos-passos-identificados-não-implementados-ainda)
 
 ## 1. Por que RAG neste projeto
 
@@ -73,7 +75,7 @@ Política de atraso (dentro do prazo):
 
 Repetindo a mesma pergunta de teste após a adição, o novo chunk foi recuperado corretamente pelo retriever, e a resposta do Max passou a ser fundamentada no conteúdo real, sem inferência: *"Se o seu pedido ainda não chegou, mas o prazo de entrega não foi ultrapassado, é esperado que ele esteja a caminho. Recomendo que aguarde um pouco mais."*
 
-**Limitação residual observada:** mesmo fundamentada, a resposta permanece genérica ("aguarde um pouco mais"), porque o sistema não coleta nem retém dados específicos do pedido (região, data de compra) durante a conversa — não há como calcular "faltam X dias" sem essa informação. Essa limitação é diferente da alucinação original: aqui o conteúdo está correto e ancorado no contexto, apenas não é personalizado. Fica documentada como próximo passo (Seção 14), ligada ao estudo futuro de `structured output`, não à cobertura de conteúdo em si — cobrir mais regras no `politicas.txt` não resolveria a falta de dado específico do cliente.
+**Limitação residual observada:** mesmo fundamentada, a resposta permanece genérica ("aguarde um pouco mais"), porque o sistema não coleta nem retém dados específicos do pedido (região, data de compra) durante a conversa — não há como calcular "faltam X dias" sem essa informação. Essa limitação é diferente da alucinação original: aqui o conteúdo está correto e ancorado no contexto, apenas não é personalizado. Fica documentada como próximo passo (Seção 16), ligada ao estudo futuro de `structured output`, não à cobertura de conteúdo em si — cobrir mais regras no `politicas.txt` não resolveria a falta de dado específico do cliente.
 
 **Nota metodológica:** esta resolução ataca apenas o caso específico testado, não o problema estrutural. Para lacunas ainda não identificadas ou cobertas, o grounding verification (Seção 8) continua sendo a única camada implementada neste projeto capaz de mitigar, de forma geral, alucinações por combinação de fatos — mas essa mitigação é parcial, não uma garantia: a própria Seção 8 documenta um falso negativo em 7 casos testados com o verificador `gpt-4o-mini`. Nenhuma camada implementada neste projeto elimina o risco por completo.
 
@@ -108,7 +110,7 @@ retriever = vectorstore.as_retriever(
 
 **Caso-limite descoberto posteriormente — frases de controle de conversa:** ao testar o comando "sair" (que encerra o programa via correspondência exata de texto, não via LLM), a variação "quero sair" foi testada por curiosidade e revelou um comportamento inesperado: o retriever encontrou o chunk "Horário de atendimento" com score suficiente para passar no threshold — aparentemente por proximidade semântica fraca em torno da palavra "atendimento" — mesmo a pergunta não tendo relação real de conteúdo com horário de funcionamento. Com esse contexto irrelevante em mãos, o LLM interpretou "quero sair" como um pedido de encerramento de atendimento e respondeu com o marcador de transferência, seguindo (de forma tecnicamente correta, mas indesejada) as regras do *system prompt*.
 
-Testando variações semelhantes ("não quero mais falar", "quero ir embora"), nenhuma reproduziu o padrão — ambas geraram contexto vazio, caindo no fallback normal de reformulação. Com apenas essas duas variações testadas, os dados não são suficientes para concluir que o caso é isolado — apenas que essas duas frases específicas não bateram no mesmo ponto cego. Outras variações não testadas ("cansei", "não aguento mais isso", "quero ir daqui") poderiam, em tese, coincidir com algum chunk por proximidade semântica da mesma forma que "quero sair" coincidiu. O que os três testes confirmam com mais segurança é que a calibração original do `score_threshold` (tabela acima) testou perguntas de negócio versus perguntas fora do domínio, mas nunca testou uma terceira categoria — frases de controle de conversa (encerrar, cancelar, desistir) — que ficou fora do conjunto de calibração original. Não implementada correção para esse caso específico; fica documentado como exemplo de que mesmo uma calibração validada com múltiplos testes pode ter pontos cegos em categorias de entrada não antecipadas, e que a extensão real desse ponto cego permanece desconhecida sem um teste mais sistemático dessa categoria (ver eval set, Seção 14).
+Testando variações semelhantes ("não quero mais falar", "quero ir embora"), nenhuma reproduziu o padrão — ambas geraram contexto vazio, caindo no fallback normal de reformulação. Com apenas essas duas variações testadas, os dados não são suficientes para concluir que o caso é isolado — apenas que essas duas frases específicas não bateram no mesmo ponto cego. Outras variações não testadas ("cansei", "não aguento mais isso", "quero ir daqui") poderiam, em tese, coincidir com algum chunk por proximidade semântica da mesma forma que "quero sair" coincidiu. O que os três testes confirmam com mais segurança é que a calibração original do `score_threshold` (tabela acima) testou perguntas de negócio versus perguntas fora do domínio, mas nunca testou uma terceira categoria — frases de controle de conversa (encerrar, cancelar, desistir) — que ficou fora do conjunto de calibração original. Não implementada correção para esse caso específico; fica documentado como exemplo de que mesmo uma calibração validada com múltiplos testes pode ter pontos cegos em categorias de entrada não antecipadas, e que a extensão real desse ponto cego permanece desconhecida sem um teste mais sistemático dessa categoria (ver eval set, Seção 16).
 
 ## 6. Limitação do `score_threshold`: transferência prematura sem contexto
 
@@ -375,13 +377,229 @@ def eh_saudacao(vectorstore_saudacoes, pergunta):
 
 **Limitação aceita conscientemente:** com 0.85, saudações em outro idioma ("hello") ou gírias regionais não incluídas na lista de exemplos ficam abaixo do threshold e não são reconhecidas como saudação — o cliente recebe o fallback de "não entendi, pode reformular?" na primeira tentativa. Essa foi uma escolha deliberada: abaixar o threshold para cobrir esses casos reduziria a margem de segurança contra falsos positivos em perguntas de negócio curtas, que é o risco mais custoso dos dois. Quando um caso específico se mostrou relevante o suficiente para justificar tratamento (a gíria "salve", mais comum no contexto brasileiro do que "hello"), a solução adotada foi ampliar a lista de exemplos de referência, não reduzir o threshold — isso resolveu o caso sem comprometer a margem de segurança já validada.
 
-**Limitação de escopo — saudação, não small talk completo:** o mecanismo cobre apenas cumprimentos ("oi", "bom dia", "salve"), não a categoria mais ampla de small talk usada em sistemas de diálogo (que também inclui despedidas, agradecimentos e perguntas de cortesia como "tudo bem?" fora do contexto de abertura). Ampliar a lista de exemplos manualmente para cobrir cada variação teria retorno decrescente — sempre existiriam casos não previstos. A alternativa mais robusta seria um LLM julgando se a mensagem é social ou tem intenção de negócio, mas isso reintroduziria uma chamada de API por mensagem para resolver um risco de baixo custo: uma mensagem social não reconhecida apenas aciona o fallback de "pode reformular?" (Seção 6), não gera informação incorreta. Mesmo critério de custo vs. risco já aplicado à fragmentação (acima) e ao query rewriting (Seção 14): a chamada extra se justifica quando o erro não tratado é caro (alucinação), não quando é um pequeno atrito de UX. Essa avaliação de custo também é específica ao contexto de estudos: em um produto real, um pequeno atrito de UX repetido em escala (muitos clientes recebendo o fallback por engano) tem custo agregado de experiência que poderia justificar a chamada extra — a decisão de mantê-la barata aqui reflete o volume de uso atual, não uma conclusão permanente sobre o valor da chamada.
+**Limitação de escopo — saudação, não small talk completo:** o mecanismo cobre apenas cumprimentos ("oi", "bom dia", "salve"), não a categoria mais ampla de small talk usada em sistemas de diálogo (que também inclui despedidas, agradecimentos e perguntas de cortesia como "tudo bem?" fora do contexto de abertura). Ampliar a lista de exemplos manualmente para cobrir cada variação teria retorno decrescente — sempre existiriam casos não previstos. A alternativa mais robusta seria um LLM julgando se a mensagem é social ou tem intenção de negócio, mas isso reintroduziria uma chamada de API por mensagem para resolver um risco de baixo custo: uma mensagem social não reconhecida apenas aciona o fallback de "pode reformular?" (Seção 6), não gera informação incorreta. Mesmo critério de custo vs. risco já aplicado à fragmentação (acima) e ao query rewriting (Seção 16). Essa avaliação de custo também é específica ao contexto de estudos: em um produto real, um pequeno atrito de UX repetido em escala (muitos clientes recebendo o fallback por engano) tem custo agregado de experiência que poderia justificar a chamada extra — a decisão de mantê-la barata aqui reflete o volume de uso atual, não uma conclusão permanente sobre o valor da chamada.
 
 **Teste de ambiguidade semântica:** como a palavra "salve" também pode ser usada como verbo ("salve meu número de rastreamento"), esse cenário foi testado deliberadamente antes de considerar a solução validada. O resultado (score 0.7854, abaixo do threshold) confirmou que o embedding distingue corretamente a interjeição isolada do verbo em contexto de frase — a comparação por similaridade captura a estrutura semântica da frase completa, não apenas a presença da palavra.
 
 **Conclusão:** o mesmo mecanismo de embedding usado para RAG de negócio pode ser reaproveitado, de forma barata, para classificar categorias de mensagem que não são sobre conteúdo de negócio (como saudações) — evitando tanto correspondência de texto frágil (listas fixas) quanto o custo de uma chamada de LLM completa para uma tarefa que não exige julgamento complexo. A calibração do threshold seguiu a mesma metodologia usada em `score_threshold` (Seção 5): testar categorias antagônicas, medir a margem real entre elas, e tratar exceções conhecidas ampliando a base de exemplos em vez de comprometer a margem de segurança já validada.
 
-## 12. Separação de responsabilidades: reorganizando `main.py` em módulos
+## 12. Ambiguidade entre políticas semanticamente próximas: chunking, retrieval e geração
+
+Este caso começou como um problema aparentemente simples — uma resposta que "misturava regras de negócio" — mas a investigação revelou que o problema real atravessava três camadas independentes do pipeline (chunking, retrieval, prompt) e só ficou visível depois de corrigir cada uma, uma de cada vez.
+
+### 12.1 Sintoma inicial: chunking por caractere fragmentando unidades de negócio
+
+Pergunta de teste:
+
+> "meu pedido foi extraviado, o que eu faço?"
+
+A base de conhecimento tem duas políticas distintas para cenários parecidos:
+
+- **Política de reenvio** — aplicável quando o cliente já relata ou confirma o extravio.
+- **Política para pedido constando como entregue, mas não recebido** — aplicável quando o extravio ainda não foi confirmado.
+
+Com `RecursiveCharacterTextSplitter` e `chunk_size=200` (Seção 2), os chunks recuperados vinham corretos individualmente, mas o LLM combinou trechos de ambas as políticas em uma única resposta, sem indicar qual das duas de fato se aplicava ao relato do cliente.
+
+**Primeira hipótese testada e descartada:** aumentar `chunk_size`. Rejeitada porque isso reintroduziria o problema original da Seção 2 — misturar múltiplos tópicos em um único chunk.
+
+**Causa real identificada:** o `RecursiveCharacterTextSplitter`, por operar em contagem de caracteres, não respeita a fronteira lógica de uma seção — uma política pode ser cortada no meio, entre uma condição e sua consequência, mesmo com `chunk_size` calibrado para o caso comum (Seção 2). Isso não havia aparecido antes porque as políticas testadas até então cabiam confortavelmente dentro de 200 caracteres; políticas mais longas (com múltiplos bullets) expunham a fragilidade.
+
+### 12.2 Migração para chunking por seção
+
+Como a base de conhecimento já é naturalmente estruturada — cada política separada por linha em branco — a solução adotada foi abandonar o splitter genérico em favor de um split manual por seção:
+
+```python
+def dividir_por_secao(texto):
+    blocos = texto.split('\n\n')
+    return [bloco.strip() for bloco in blocos if bloco.strip()]
+```
+
+Cada bloco resultante vira um `Document` inteiro, sem dependência de `chunk_size`/`chunk_overlap`. Isso elimina por completo o risco de uma política ser cortada no meio, independente do seu tamanho.
+
+**Trade-off aceito:** essa solução só funciona porque a base é pequena e uniformemente estruturada (uma política = um parágrafo). Não escalaria para documentos sem essa convenção de formatação — nesse caso, uma solução mais geral seria necessária (ex.: chunking semântico via embeddings, ou marcação explícita de seções via metadados).
+
+### 12.3 Ambiguidade residual: scores quase empatados entre duas políticas distintas
+
+Corrigido o chunking, o sintoma original (resposta misturando políticas) desapareceu — mas o Max ainda escolhia, em algumas execuções, a política errada por completo (a de "pedido não recebido" em vez de "reenvio"). Investigando os scores de relevância (`similarity_search_with_relevance_scores`, já na escala 0-1 usada pelo `score_threshold`, diferente da distância L2 padrão do FAISS — ver nota na Seção 5), os dois chunks vinham com uma diferença de apenas ~0.0002 entre si (0.7927 vs. 0.7925), dentro da margem de ruído do embedding.
+
+**Causa identificada:** as duas políticas compartilham vocabulário de superfície ("extravio", "pedido", "investigação"), sem que o texto original deixasse explícito, de forma textual, a condição que diferencia uma da outra. O embedding não tinha sinal suficiente para discriminar entre "extravio relatado pelo cliente" e "extravio ainda não confirmado" — uma distinção óbvia para um leitor humano, mas pouco marcada lexicalmente no texto original.
+
+### 12.4 Reformulação da base de conhecimento com condições de aplicabilidade explícitas
+
+A correção foi reescrever o título de cada política ambígua para incluir, entre parênteses, sua condição de aplicabilidade de forma redundante e explícita — uma técnica de *chunk enrichment*, escolhida por aproveitar o peso que muitos modelos de embedding dão às primeiras tokens de um texto:
+
+```
+Política de reenvio (aplicável quando o cliente relata ou confirma que o pedido foi extraviado, ou quando recebeu um item incorreto):
+...
+
+Política para pedido constando como entregue no sistema, mas que o cliente afirma não ter recebido (situação de extravio ainda não confirmado, diferente de quando o cliente já relata diretamente o extravio):
+...
+```
+
+O mesmo padrão foi aplicado ao par "Política de atraso" / "pedido não recebido", que tinha o mesmo tipo de sobreposição.
+
+### 12.5 Regressão temporária: fragmentação reintroduzida pelo texto mais longo
+
+Reindexando a base reformulada, o retrieval voltou a trazer fragmentos de uma linha só — o mesmo sintoma da Seção 12.1, mas agora causado indiretamente: os títulos mais longos (com a condição de aplicabilidade) empurraram o tamanho de algumas seções para além do que o `RecursiveCharacterTextSplitter` ainda estava configurado a aceitar, já que a migração completa para chunking por seção (12.2) só havia sido validada com o texto original, mais curto.
+
+Isso não chegou a ser uma falha nova — foi a confirmação, com um segundo caso real, de que qualquer dependência residual de `chunk_size` continuava frágil frente a mudanças de conteúdo. A correção definitiva já estava em 12.2; esse passo intermediário serviu como evidência de que não havia mais como adiar a migração completa.
+
+### 12.6 Regra de seleção de política no system prompt
+
+Com chunking por seção e texto reformulado, os chunks passaram a chegar completos e com condição de aplicabilidade explícita — mas o LLM de geração ainda não tinha instrução de como *usar* essa condição para decidir qual política seguir quando mais de uma aparecia no contexto. O `system.txt` já continha uma regra genérica ("cada política deve ser tratada como independente"), mas nenhuma regra de desempate.
+
+Adicionada uma seção nova ao prompt:
+
+```
+## Seleção da política aplicável
+
+* Quando mais de uma política do contexto tratar de situações parecidas, cada uma delas terá uma condição de aplicabilidade descrita entre parênteses em seu título.
+* Compare o que o cliente relatou explicitamente com a condição de cada política e aplique apenas aquela cuja condição corresponda ao relato do cliente.
+* Se o cliente afirmar diretamente que o pedido foi extraviado, isso conta como o relato exigido pela política correspondente — não é necessário aguardar confirmação adicional para aplicá-la.
+* Ignore políticas cuja condição de aplicabilidade não corresponda ao que foi relatado, mesmo que estejam presentes no contexto.
+```
+
+### 12.7 Conflito entre o novo raciocínio exigido e o verificador de grounding
+
+Com a regra acima, o Max passou a escolher a política correta — mas a resposta era bloqueada pelo `verificar_grounding` (Seção 8), que classificava a resposta como não fundamentada.
+
+**Causa raiz:** a resposta correta começava com "Como você relatou que seu pedido foi extraviado...", uma ponte lógica entre o que o cliente disse (não presente no `contexto`, só na `pergunta`) e a condição de aplicabilidade escrita no chunk. O prompt do verificador (Seção 8) proibia qualquer afirmação "não literalmente escrita no contexto" — sem exceção — e também nunca recebia a pergunta original como parâmetro, então não tinha como saber que essa inferência era legítima. As duas camadas do sistema (o prompt principal, que exige esse tipo de raciocínio; o verificador, que o proíbe sem exceção) estavam, na prática, em conflito direto.
+
+Esse caso é um exemplo concreto do risco já registrado na Seção 8 ("um falso negativo em 7 casos testados") — só que aqui na direção oposta: um **falso positivo** de bloqueio, causado não por falta de robustez do verificador, mas por uma mudança em outra camada do sistema que o verificador não foi atualizado para acompanhar.
+
+### 12.8 Correção do verificador: exceção para inferência legítima + passagem da pergunta original
+
+```python
+def verificar_grounding(llm, pergunta, contexto, resposta):
+    prompt_verificacao = f"""Você é um verificador de fatos. Analise se a resposta abaixo é sustentada pelo contexto fornecido.
+
+Pergunta do cliente:
+{pergunta}
+
+Contexto:
+{contexto}
+
+Resposta a verificar:
+{resposta}
+
+A resposta pode aplicar uma política do contexto com base na condição de aplicabilidade dela, desde que essa condição corresponda a algo que o cliente afirmou na pergunta. Isso NÃO é considerado inferência indevida.
+
+O que NÃO é permitido: a resposta inventar dados sobre o pedido (região, prazo, datas, status) que não foram mencionados nem pelo cliente nem pelo contexto, ou combinar políticas de forma que nenhuma delas sustente isoladamente a afirmação.
+
+A resposta contém alguma afirmação, recomendação ou instrução que não seja sustentada pelo contexto ou pelo que o cliente relatou? Responda apenas SIM ou NÃO."""
+
+    verificacao = llm.invoke(prompt_verificacao)
+    return 'SIM' in verificacao.content.upper()
+```
+
+A mudança de assinatura (`pergunta` como novo parâmetro) exigiu também alterar o ponto de chamada em `main.py`, passando a pergunta original recebida do `input()`.
+
+### 12.9 Falha em obter justificativa: reordenação para raciocínio antes do veredito
+
+Ao adicionar debug temporário pedindo justificativa (formato "SIM/NÃO, depois explique"), o modelo ignorou a instrução secundária e respondeu apenas o veredito — um comportamento consistente com o já observado em outros pontos do projeto (Seção 7): instruções de formato posicionadas depois da pergunta principal têm menor adesão em modelos menores.
+
+Correção: inverter a ordem, pedindo raciocínio **antes** do veredito (uma forma de *chain-of-thought* aplicada ao próprio verificador, não só ao gerador de respostas), e extrair o veredito apenas da última linha da resposta — não com `'SIM' in texto_completo`, já que o raciocínio em si pode conter a palavra "sim" em outro sentido, o que geraria falso positivo na extração:
+
+```python
+    verificacao = llm.invoke(prompt_verificacao)
+    linhas = verificacao.content.strip().split('\n')
+    veredito = linhas[-1] if linhas else verificacao.content
+    return 'SIM' in veredito.upper()
+```
+
+Com essa mudança, o raciocínio do verificador ficou visível e passou a confirmar exatamente o motivo do bloqueio anterior — evidência direta, não só inferida, da causa raiz identificada em 12.7.
+
+### 12.10 Validação com múltiplas execuções
+
+Como os scores de retrieval entre as duas políticas continuavam próximos (12.3 não elimina a proximidade, só reduz o risco de inversão via reformulação de texto), o caso foi testado três vezes seguidas antes de ser considerado resolvido. Nas três execuções, o Max escolheu a política correta e o verificador liberou a resposta, com raciocínio consistente nas três — evidência de estabilidade, não de uma correção que dependia de sorte em uma única chamada.
+
+### 12.11 Conclusão da seção
+
+Esse caso demonstra que um sintoma observado em uma única camada (a resposta final) pode ter causa em qualquer uma das camadas anteriores do pipeline — chunking, texto da base de conhecimento, retrieval, prompt de geração, ou prompt de verificação — e que corrigir uma camada pode expor ou até criar uma nova falha em outra, se as duas não forem tratadas como um sistema acoplado. Em particular, o verificador de grounding (Seção 8) não é uma camada estática e neutra: instruções adicionadas ao prompt principal (como a regra de seleção de política, 12.6) podem entrar em conflito direto com regras já existentes no verificador, exigindo revisão coordenada das duas camadas, não apenas da que gerou a resposta.
+
+## 13. Eval set automatizado: da validação manual a um script reproduzível
+
+A Seção 16 já identifica um "eval set mais robusto" como próximo passo. Esta seção documenta a implementação de uma primeira versão funcional, motivada diretamente pela investigação da Seção 12: validar manualmente cada mudança de prompt digitando a mesma pergunta no terminal deixou de ser viável a partir do momento em que uma única correção (12.8, 12.9) passou a ter potencial de afetar qualquer resposta do sistema, não só o caso de teste em foco.
+
+### 13.1 Estrutura do eval set
+
+Um arquivo `tests/eval_set.json` reúne casos de teste no formato:
+
+```json
+{
+  "pergunta": "meu pedido foi extraviado, o que eu faço?",
+  "checks": { "grounding_should_fail": false },
+  "limitacao_conhecida": false
+}
+```
+
+Cada caso testa exatamente um aspecto do pipeline (`is_greeting`, `should_find_context`, `needs_more_information` ou `grounding_should_fail`) — não uma resposta completa. Essa decisão de design evita ambiguidade sobre o que causou uma falha: um caso testando `grounding_should_fail` não também afirma nada sobre `should_find_context`, mesmo que ambos dependam do mesmo retriever internamente.
+
+O campo `limitacao_conhecida` distingue uma falha aceita conscientemente (documentada em seções anteriores, como o falso negativo da Seção 8 ou o caso "hello" da Seção 11) de uma regressão real — permitindo que o script reporte as duas categorias separadamente, sem misturar "funcionando como esperado, mas com limitação conhecida" com "quebrou".
+
+### 13.2 Script de execução
+
+`tests/run_evals.py` carrega o JSON, inicializa os mesmos componentes usados em produção (`retriever`, `llm_chat`, `llm_verificador`, `system_prompt`) e despacha cada caso para uma função avaliadora correspondente ao seu tipo de `check`, via um dicionário de despacho:
+
+```python
+AVALIADORES = {
+    'is_greeting': avaliar_is_greeting,
+    'should_find_context': avaliar_should_find_context,
+    'needs_more_information': avaliar_needs_more_information,
+    'grounding_should_fail': avaliar_grounding_should_fail,
+}
+```
+
+**Por que despacho por dicionário, e não uma cadeia de `if/elif`:** o nome do campo em `checks` já identifica o tipo de verificação, sem precisar de um campo redundante (`tipo_verificacao`) duplicando essa informação — e adicionar um novo tipo de check no futuro (Seção 13.7) significa acrescentar uma entrada ao dicionário, não editar uma cadeia condicional existente.
+
+### 13.3 Bug exposto pela primeira execução: assinatura desatualizada entre módulos
+
+A primeira tentativa de rodar o script falhou com `TypeError`, porque `avaliar_grounding_should_fail` ainda chamava `verificar_grounding(llm, contexto, resposta)` — a assinatura anterior à correção da Seção 12.8, que passou a exigir `pergunta` como parâmetro adicional. O script de avaliação havia sido escrito contra a versão anterior da função e não foi atualizado junto com a mudança em produção.
+
+**Lição:** um eval set que chama as mesmas funções usadas em produção (em vez de reimplementar a lógica) tem a vantagem de testar o comportamento real, mas herda o mesmo risco de qualquer outro consumidor de uma função: uma mudança de assinatura precisa ser propagada a todos os pontos de chamada, incluindo os de teste — não só os de produção, que são os que costumam vir à mente primeiro.
+
+### 13.4 Um segundo verificador com o mesmo tipo de falha, exposto pelo eval set
+
+Testando manualmente uma pergunta deliberadamente fora de escopo ("posso trocar meu pedido por outro produto de valor maior pagando a diferença?"), o `verificar_informacao_suficiente` (que decide se falta região/prazo/data antes mesmo de buscar contexto) classificou incorretamente como "falta informação" — presumindo a existência de uma política de troca condicionada a região, quando na verdade a base de conhecimento não cobre trocas de produto de forma alguma.
+
+**Causa identificada:** o mesmo padrão da Seção 12.9 — o prompt desse verificador tinha exemplos cobrindo atraso, extravio, reembolso e horário, mas nenhum exemplo próximo de "pergunta sobre algo que a empresa simplesmente não oferece". Sem esse sinal, o modelo generalizou pelo padrão mais parecido ("situação + problema do pedido → falta dado"), ignorando que a limitação real não era falta de dado, e sim ausência de política sobre o assunto.
+
+Aplicada a mesma correção estrutural de 12.8/12.9 — raciocínio explícito antes do veredito, e um exemplo novo cobrindo esse tipo de caso:
+
+```
+"posso trocar meu pedido por outro produto de valor maior?" → NÃO (a resposta não depende de região, prazo ou data — depende de existir ou não uma política de troca, o que é um tipo de limitação diferente)
+```
+
+O ajuste melhorou a qualidade do raciocínio do modelo (a justificativa passou a mencionar explicitamente que "políticas de extravio geralmente são aplicáveis independentemente dessas variáveis"), mas **não corrigiu por completo** o caso de troca de produto, que continuou retornando incorretamente `needs_more_information: True`.
+
+### 13.5 Decisão consciente de não reordenar o pipeline para corrigir o caso
+
+A correção estrutural desse caso exigiria que `verificar_informacao_suficiente` tivesse acesso ao conteúdo da base de conhecimento (via retrieval) antes de decidir se falta um dado do pedido ou se o assunto simplesmente não é coberto — hoje ele julga apenas a partir do texto da pergunta, isolado.
+
+Isso exigiria mover essa checagem para depois do retrieval no `main.py`, o que tem três custos: (a) toda pergunta passaria a pagar uma chamada de embedding/busca vetorial antes da checagem, mesmo as que hoje são filtradas de forma barata sem retrieval; (b) o prompt do verificador cresceria com os chunks recuperados embutidos, aumentando tokens de entrada em toda chamada, não só nas afetadas; (c) latência adicional no caminho crítico.
+
+Dado que esse verificador já cobre corretamente os cenários mais prováveis de uso real (atraso, cancelamento, prazo), e a pergunta que expôs a falha é sobre um cenário de negócio que a empresa fictícia sequer oferece (troca de produto — a XYZ Entregas é uma transportadora, não um varejista), a decisão foi documentar como limitação conhecida em vez de reordenar o pipeline agora — o mesmo critério de custo vs. risco já aplicado em outras decisões deste documento (Seções 8, 11, 16).
+
+### 13.6 Resultado da primeira execução completa
+
+Com as duas correções acima aplicadas (13.3, 13.4) e um caso novo adicionado ao JSON documentando a limitação de 13.5, a primeira execução completa do eval set (25 casos) retornou:
+
+| Resultado | Quantidade |
+|---|---|
+| Passou | 22 |
+| Falhou (limitação conhecida) | 3 |
+| Falhou (inesperado) | 0 |
+| Não testável | 0 |
+
+As 3 falhas esperadas correspondem a limitações já documentadas neste arquivo: reconhecimento de saudação em inglês (Seção 11), o falso negativo de grounding do caso "reembolso demorando um pouco mais" (Seção 8), e o caso de troca de produto (Seção 13.5). Zero falhas inesperadas confirma que as mudanças de chunking, prompt e verificador desta sessão (Seção 12) não regrediram nenhum comportamento validado anteriormente por este eval set.
+
+### 13.7 Limitação identificada no próprio eval set
+
+Nenhum dos quatro tipos de check implementados valida qual política de negócio foi de fato aplicada na resposta final — apenas se contexto foi encontrado, se a resposta é fundamentada, e se falta informação. O caso central da Seção 12 (Max escolhendo a política errada entre duas candidatas) não teria sido capturado por este eval set: a resposta seguindo a política incorreta (12.1-12.3) também estava tecnicamente "fundamentada" no contexto (o Chunk 1 é texto real da base) e também "encontrava contexto" — ambos os checks existentes teriam retornado `PASSOU` mesmo com a resposta de negócio incorreta.
+
+Fica documentado como próximo passo: um quinto tipo de check (ex.: `resposta_deve_conter` / `resposta_nao_deve_conter`, testando substring esperada ou proibida na resposta final) cobriria esse tipo de caso, mas não foi implementado nesta versão — decisão consistente com o restante deste documento, de tratar evolução do eval set como parte do próximo passo já listado na Seção 16, não como algo a resolver no mesmo ciclo em que o eval set básico foi criado.
+
+## 14. Separação de responsabilidades: reorganizando `main.py` em módulos
 
 Com a adição de persistência, grounding verification e detecção de saudação, `main.py` acumulou seis funções de propósitos distintos além do próprio loop de conversa — carregamento de prompt, carregamento e persistência da base de conhecimento, carregamento do índice de saudação, busca de contexto, detecção de saudação e verificação de grounding. Testar novas funcionalidades (como um eval set automatizado) sobre esse arquivo único tornaria a leitura progressivamente mais difícil.
 
@@ -404,7 +622,7 @@ Com a adição de persistência, grounding verification e detecção de saudaç�
 
 **Lição:** dividir código em módulos preserva a lógica de cada função, mas não preserva automaticamente a *ordem relativa* de efeitos colaterais que dependiam de sequência (como configurar um sistema de logging antes de qualquer import que possa disparar um aviso). Esse tipo de regressão é silencioso — o programa continua funcionando, só o comportamento observável (o que aparece no terminal vs. no log) muda — por isso só foi percebido ao rodar o programa normalmente, não por erro ou teste automatizado.
 
-## 13. Conclusões gerais
+## 15. Conclusões gerais
 
 - RAG reduz alucinação, mas não a elimina — mesmo com contexto correto recuperado, o modelo pode combinar fatos legítimos de formas não autorizadas pelo negócio.
 - Instruções em linguagem natural no *system prompt* têm um teto de eficácia: proibições, checagens explícitas e restrições literais foram testadas e nenhuma bloqueou o comportamento por completo.
@@ -417,14 +635,16 @@ Com a adição de persistência, grounding verification e detecção de saudaç�
 - Silenciar um aviso técnico e redirecioná-lo para um log são decisões diferentes: a primeira descarta informação, a segunda a preserva para diagnóstico sem expô-la à interface do usuário.
 - Embeddings são úteis além da recuperação de conteúdo de negócio: classificar tipo de mensagem (saudação vs. pergunta real) é uma aplicação barata da mesma técnica, desde que a margem entre categorias seja validada com casos antagônicos reais, não presumida.
 - Separar código por domínio do problema e momento de execução — não por tamanho de arquivo — facilita leitura e testagem isolada; funções que apenas usam um objeto já criado não precisam reimportar a biblioteca que o originou.
+- Chunking, texto da base de conhecimento, retrieval, prompt de geração e prompt de verificação são camadas acopladas, não independentes: corrigir uma pode expor — ou até criar — um conflito latente em outra que não foi revisada em conjunto. Um sintoma observado na resposta final pode ter causa em qualquer camada anterior do pipeline.
+- Um eval set automatizado, mesmo simples, é mais confiável do que validação manual repetida a partir do momento em que uma mudança de prompt passa a ter potencial de efeito colateral amplo — mas precisa ser mantido sincronizado com mudanças de assinatura nas funções de produção que ele testa, e seus tipos de check definem exatamente o que ele é capaz (e incapaz) de detectar.
 
-## 14. Próximos passos identificados (não implementados ainda)
+## 16. Próximos passos identificados (não implementados ainda)
 
 Ordenados pela sequência de cobertura planejada, não pela ordem de descoberta.
 
-- **Frameworks de avaliação automatizada (evolução do eval set manual):** ferramentas como Promptfoo, DeepEval e RAGAS geram e avaliam casos de teste em maior escala — incluindo red-teaming automatizado (variações adversariais, tentativas de quebrar o sistema) e métricas de RAG específicas (fidelidade, relevância). Diferente do eval set manual planejado aqui, essas ferramentas ajudam a gerar volume e variação de casos, mas ainda dependem de julgamento humano para definir categorias de risco relevantes ao domínio (como a categoria "frases de controle de conversa" descoberta na Seção 5, com "quero sair"). Não adotadas agora por serem um nível de sofisticação maior do que o projeto exige neste estágio — exigem configuração de framework externo e fazem mais sentido como evolução na fase de observabilidade do roadmap de estudos (LangSmith, tracing), quando também se torna possível um segundo nível de evolução: alimentar o eval set com feedback de uso real em produção (perguntas de clientes, sinais implícitos de insatisfação como pedir transferência logo após uma resposta), em vez de depender apenas de casos pensados manualmente antes do deploy.
-- **Eval set mais robusto:** ampliar o conjunto de perguntas de teste usado para calibrar `score_threshold` e o grounding verification, cobrindo mais variações de pergunta específica, difusa e fora do domínio — para determinar se a taxa de falso negativo do verificador `gpt-4o-mini` justifica o custo extra do `gpt-4o` em uso real. Planejado antes do few-shot, para que os exemplos escolhidos sejam informados por casos mapeados sistematicamente, não apenas pelos que já surgiram por acaso durante os testes manuais.
-- **Few-shot prompting:** incluir no *system prompt* um exemplo concreto de pergunta ambígua com a resposta correta esperada, em vez de apenas descrever a regra de forma abstrata. Depende do eval set anterior para escolher exemplos representativos.
+- **Frameworks de avaliação automatizada (evolução do eval set manual):** ferramentas como Promptfoo, DeepEval e RAGAS geram e avaliam casos de teste em maior escala — incluindo red-teaming automatizado (variações adversariais, tentativas de quebrar o sistema) e métricas de RAG específicas (fidelidade, relevância). Diferente do eval set automatizado já implementado (Seção 13), essas ferramentas ajudam a gerar volume e variação de casos, mas ainda dependem de julgamento humano para definir categorias de risco relevantes ao domínio (como a categoria "frases de controle de conversa" descoberta na Seção 5, com "quero sair"). Não adotadas agora por serem um nível de sofisticação maior do que o projeto exige neste estágio — exigem configuração de framework externo e fazem mais sentido como evolução na fase de observabilidade do roadmap de estudos (LangSmith, tracing), quando também se torna possível um segundo nível de evolução: alimentar o eval set com feedback de uso real em produção (perguntas de clientes, sinais implícitos de insatisfação como pedir transferência logo após uma resposta), em vez de depender apenas de casos pensados manualmente antes do deploy.
+- **Eval set mais robusto:** uma primeira versão foi implementada (Seção 13), com 25 casos cobrindo saudação, recuperação de contexto, necessidade de mais informação e grounding, rodando via `tests/run_evals.py` contra as mesmas funções usadas em produção. Duas pendências reais continuam em aberto: (a) ampliar o número de perguntas cobertas, incluindo mais variações de pergunta específica, difusa e fora do domínio, para determinar se a taxa de falso negativo do verificador `gpt-4o-mini` (Seção 8) justifica o custo extra do `gpt-4o` em uso real; (b) um quinto tipo de check validando qual política de negócio foi de fato aplicada na resposta final — gap identificado na Seção 13.7, já que os quatro tipos de check atuais não capturariam o caso da Seção 12 (política errada escolhida) se ele se repetisse hoje, porque uma resposta com a política errada ainda pode estar "fundamentada" e "com contexto encontrado". Planejado antes do few-shot, para que os exemplos escolhidos sejam informados por casos mapeados sistematicamente, não apenas pelos que já surgiram por acaso durante os testes manuais.
+- **Few-shot prompting:** parcialmente endereçado de forma pontual — a seção "Seleção da política aplicável" adicionada ao `system.txt` (Seção 12.6), o prompt de `verificar_grounding` (Seção 12.8) e o prompt de `verificar_informacao_suficiente` (Seção 13.4) já incorporam exemplos concretos e explícitos, cada um adicionado reativamente no momento em que uma falha específica foi identificada. O que ainda não foi feito é uma aplicação sistemática dessa técnica: escolher exemplos representativos a partir do eval set completo (Seção 13), cobrindo classes de ambiguidade ainda não mapeadas, em vez de reagir apenas aos casos que já surgiram durante os testes manuais. Continua dependendo do eval set mais robusto (item acima) para essa etapa sistemática.
 - **Query rewriting (contextual retrieval) e HyDE (Hypothetical Document Embeddings):** `buscar_contexto` recebe apenas a pergunta atual, isolada do histórico da conversa — diferente do LLM de geração, que recebe `messages` completo. Em uma sequência como "meu pedido atrasou" seguida de "e já faz 5 dias", a segunda busca vetorial usaria só a frase vaga, sem termos que o embedding relacione bem ao `politicas.txt`, mesmo a pergunta fazendo sentido no contexto da conversa. Duas técnicas resolvem esse tipo de problema por caminhos diferentes: *query rewriting* reformula a pergunta do usuário (com base no histórico) antes de gerar o embedding de busca; *HyDE* gera uma resposta hipotética para a pergunta e usa o embedding dessa resposta hipotética na busca, em vez do embedding da pergunta em si — a ideia é que uma resposta hipotética tende a ser semanticamente mais próxima de um chunk real (que também é texto de afirmação) do que uma pergunta pura. Ambas exigem uma chamada de LLM adicional antes do retriever. **Decisão consciente de não implementar nenhuma agora:** o objetivo deste projeto é educacional, e o custo extra por mensagem não se justifica na base de conhecimento atual (pequena, ~7 blocos). A decisão entre as duas técnicas — ou nenhuma — depende de um dado que só existe com uma base maior: qual o comportamento real de retrieval multi-turno em um volume de conteúdo mais próximo de produção. Fica planejado reavaliar as duas quando a base de conhecimento for expandida (ver item "base de conhecimento maior via PDF" no roadmap de estudos), testando-as sob a mesma base, em vez de decidir com a base pequena atual. Essa decisão é específica ao estágio de estudos do projeto: em um cenário de produção com volume real de conversas multi-turno, o custo por chamada deixaria de ser o critério dominante frente ao impacto de uma busca ruim na experiência do cliente, e a decisão provavelmente pesaria a favor de implementar uma das duas técnicas.
 - **Crescimento ilimitado do histórico de mensagens:** `messages` acumula toda a conversa (`HumanMessage` e `AIMessage`) sem nenhum mecanismo de limite, e a lista inteira é reenviada ao modelo a cada nova pergunta. Isso gera dois problemas reais em conversas longas: custo cumulativo crescente por mensagem (a N-ésima pergunta reenvia todas as N-1 anteriores), e risco de exceder a janela de contexto máxima do modelo, o que causaria falha na chamada. É uma limitação já ativa hoje, não apenas hipotética — mas invisível no padrão de uso atual, porque as sessões de teste realizadas até aqui nunca foram longas o suficiente para o sintoma se manifestar de forma perceptível (nem em custo, nem em erro de janela excedida).
   Duas abordagens comuns resolvem isso, cada uma com trade-off diferente: **janela de mensagens recentes** (`ConversationBufferWindowMemory` do LangChain, ou truncamento manual — mecanicamente a mesma solução, via biblioteca ou código próprio), que mantém só as últimas N mensagens sem custo de chamada adicional, mas corre o risco de descartar informação relevante mencionada fora da janela (ex.: região do cliente, dita no início de uma conversa longa); e **memória com resumo periódico**, em que uma chamada ao LLM condensa o histórico acumulado quando um limite é atingido (não a cada mensagem), preservando mais contexto relevante ao custo de uma chamada extra periódica.
