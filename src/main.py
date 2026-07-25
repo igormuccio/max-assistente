@@ -84,8 +84,6 @@ def main():
             if texto:
                 reply += texto
 
-        print(f"\n[DEBUG] Resposta bruta antes da verificação: {reply}")
-
         if 'TRANSFER_HUMANO' in reply.upper():
             print('Aguarde, vou transferir para um atendente.')
             print('[Sistema]: Transferindo...')

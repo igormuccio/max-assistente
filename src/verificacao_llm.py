@@ -27,7 +27,6 @@ Raciocínio: <sua explicação>
 Veredito: SIM ou NÃO"""
 
     verificacao = llm.invoke(prompt)
-    print(f'\n[DEBUG] Resposta do verificador de informação: {verificacao.content}')
 
     linhas = verificacao.content.strip().split('\n')
     veredito = linhas[-1] if linhas else verificacao.content
@@ -58,7 +57,6 @@ Raciocínio: <sua explicação>
 Veredito: SIM ou NÃO"""
 
     verificacao = llm.invoke(prompt_verificacao)
-    print(f"\n[DEBUG] Resposta completa do verificador de grounding: {verificacao.content}")
 
     linhas = verificacao.content.strip().split('\n')
     veredito = linhas[-1] if linhas else verificacao.content
