@@ -123,5 +123,12 @@
   "pergunta": "meu pedido chegou amassado, posso trocar por outro produto de valor maior pagando a diferença?",
   "checks": { "needs_more_information": false },
   "limitacao_conhecida": true
-}
+  },
+  {
+  "pergunta": "meu pedido foi extraviado, o que eu faço?",
+  "texto_proibido": "48",
+  "checks": { "contem_texto_proibido": false },
+  "limitacao_conhecida": false
+  }
+
 ]

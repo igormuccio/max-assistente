@@ -58,6 +58,15 @@ def avaliar_grounding_should_fail(pergunta, retriever, llm_chat, llm_verificador
 
     return verificar_grounding(llm_verificador, pergunta, contexto, reply)
 
+def avaliar_contem_texto_proibido(pergunta, retriever, llm_chat, system_prompt, texto_proibido, **kwargs):
+    contexto = buscar_contexto(retriever, pergunta)
+    if not contexto.strip():
+        return None
+
+    reply = gerar_resposta_max(llm_chat, system_prompt, contexto, pergunta)
+
+    return texto_proibido.upper() in reply.upper()
+
 
 # Mapa: nome do campo em "checks" -> função que sabe avaliá-lo.
 # O nome do campo já diz o que está sendo verificado, sem precisar de um
@@ -67,6 +76,7 @@ AVALIADORES = {
     'should_find_context': avaliar_should_find_context,
     'needs_more_information': avaliar_needs_more_information,
     'grounding_should_fail': avaliar_grounding_should_fail,
+    'contem_texto_proibido': avaliar_contem_texto_proibido,
 }
 
 
@@ -84,7 +94,12 @@ def rodar_caso(caso, **contexto_execucao):
         raise ValueError(f'Check desconhecido: {nome_check}')
 
     avaliador = AVALIADORES[nome_check]
-    resultado_real = avaliador(pergunta, **contexto_execucao)
+
+    argumentos_extras = {}
+    if 'texto_proibido' in caso:
+        argumentos_extras['texto_proibido'] = caso['texto_proibido']
+
+    resultado_real = avaliador(pergunta, **contexto_execucao, **argumentos_extras)
 
     return nome_check, esperado, resultado_real
 
