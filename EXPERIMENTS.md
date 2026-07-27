@@ -231,6 +231,28 @@ A quarta versão (chamadas separadas) foi a única que resolveu os dois lados si
 
 **Possível evolução futura:** a escolha de modelo não precisa ser a mesma para os dois papéis. Uma arquitetura mais madura poderia manter um modelo econômico (`gpt-4o-mini`) para gerar respostas — a etapa de maior volume de chamadas — e reservar um modelo mais robusto apenas para a etapa crítica de verificação, que ocorre uma vez por resposta. Isso concentraria o custo mais alto exatamente onde a segurança importa mais, em vez de pagar o mesmo prêmio em toda a interação.
 
+**Instabilidade do veredito mesmo com `temperature=0`, entrada idêntica:** durante a investigação da Seção 12, um caso do eval set (`grounding_should_fail` para "meu pedido foi extraviado") passou a falhar de forma intermitente entre execuções do `test_eval_set.py`, sem nenhuma mudança de código relacionada. A hipótese inicial foi a variação de fraseado do `llm_chat` (`temperature=0.3`) — testada isolando a variável: rodando `gerar_resposta_max` e `verificar_grounding` em laço, 5 vezes seguidas, para a mesma pergunta e contexto.
+
+Com `temperature=0.3` no gerador, o texto da resposta variou levemente entre execuções (troca de "se" por "caso", pequenas diferenças de pontuação), e o veredito do grounding também variou (4x bloqueou, 1x não) — consistente com a hipótese inicial. Repetindo o mesmo teste com `temperature=0` no `llm_chat`, o texto da resposta ficou **idêntico** nas 5 execuções — mas o veredito do `verificar_grounding` (cujo `llm_verificador` já era `temperature=0` desde a Seção 8 original) ainda variou: 4x `True`, 1x `False`, com a mesma pergunta, mesmo contexto e mesma resposta em todas as chamadas.
+
+**Causa:** `temperature=0` reduz drasticamente a aleatoriedade de um LLM, mas não é uma garantia absoluta de determinismo bit-a-bit entre chamadas de API separadas — variações na forma como a inferência é processada no backend (operações de ponto flutuante em lote, paralelizadas entre GPUs) podem produzir pequenas diferenças de saída mesmo para uma entrada idêntica. Isso é documentado pela própria OpenAI como comportamento esperado da API, não um bug do projeto.
+
+**Implicação:** o falso negativo de 1 em 7 casos já documentado acima pode não ser explicado inteiramente pela capacidade do `gpt-4o-mini` como verificador — parte da taxa de erro observada pode ser instabilidade inerente à infraestrutura de inferência, presente em qualquer modelo, inclusive um mais forte. Isso também significa que nenhum volume de testes manuais prova ausência de variação — apenas reduz a incerteza sobre a taxa dela, nunca a elimina.
+
+**Mitigação avaliada e descartada por ora — retry com maioria de votos:** chamar `verificar_grounding` N vezes (N ímpar, ex. 3) para o mesmo caso e decidir pelo veredito mais frequente reduziria o risco de uma única chamada instável decidir o resultado:
+
+```python
+def verificar_grounding_com_retry(llm, pergunta, contexto, resposta, tentativas=3):
+    resultados = [
+        verificar_grounding(llm, pergunta, contexto, resposta)
+        for _ in range(tentativas)
+    ]
+    votos_falha = sum(resultados)
+    return votos_falha > tentativas / 2
+```
+
+**Decisão consciente de não implementar:** isso triplicaria o custo da etapa de verificação (já a segunda chamada de LLM por interação), para mitigar uma instabilidade observada apenas em teste deliberado de execuções repetidas, não em uso normal do projeto. Mesmo critério de custo vs. risco já aplicado a outras decisões deste documento (Seções 8, 11, 13, 16). Fica documentado como opção validada, caso a taxa de instabilidade se mostre mais frequente ou relevante em uso real.
+
 ## 9. Persistência do índice FAISS: eliminando reprocessamento desnecessário
 
 Nas versões anteriores do projeto, `carregar_base_conhecimento()` recalculava o índice FAISS do zero a cada execução — carregando o `politicas.txt`, quebrando em chunks e gerando embeddings via API da OpenAI para cada um deles, mesmo quando nada havia mudado desde a última vez. Isso levava entre 10 e 15 segundos por execução, um custo que cresceria proporcionalmente ao tamanho da base de conhecimento em um cenário de produção real.
