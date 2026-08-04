@@ -21,6 +21,12 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [15. Conclusões gerais](#15-conclusões-gerais)
 - [16. Próximos passos identificados (não implementados ainda)](#16-próximos-passos-identificados-não-implementados-ainda)
 
+---
+
+# Parte 2 — Experimento de escala: migração para base em PDF
+
+- [17. Migração da base de conhecimento para PDF: extração estrutural via metadados de fonte](#17-migração-da-base-de-conhecimento-para-pdf-extração-estrutural-via-metadados-de-fonte)
+
 ## 1. Por que RAG neste projeto
 
 O Max responde perguntas sobre políticas de uma empresa fictícia de entregas. Um LLM genérico não tem conhecimento sobre essas políticas — sem RAG, ele responderia com base em suposições (alucinação) ou se recusaria a responder. RAG resolve isso buscando, a cada pergunta, apenas o trecho relevante da base de conhecimento e injetando esse trecho no prompt, em vez de:
@@ -673,3 +679,72 @@ Ordenados pela sequência de cobertura planejada, não pela ordem de descoberta.
   Não implementado agora: testar isso de forma significativa exigiria criar cenários de conversa longa manualmente, o que não compensa o esforço no estágio atual do projeto — mais sensato avaliar quando houver uma base de conhecimento maior e um processo de testes automatizados em vigor (eval set, e possivelmente os frameworks descritos acima), em vez de simular manualmente conversas extensas agora. Corresponde à Fase 3 do roadmap de estudos ("Memória de conversa"). Assim como as demais decisões de custo deste documento, essa é uma escolha calibrada para o volume de uso de um projeto de estudos; em produção, com conversas mais longas e recorrentes, o mesmo problema deixaria de ser tolerável e a implementação de uma das duas abordagens passaria a ser necessária, não opcional.
 - **Detecção de mensagens fragmentadas ou incompletas:** cenário identificado na Seção 11, mas não implementado por exigir julgamento semântico (provavelmente via LLM), reintroduzindo custo de chamada por mensagem recebida.
 - **Cálculo de prazo restante personalizado (ex.: "falta 1 dia até o pedido entrar em atraso"):** identificado ao testar a nova regra de "atraso dentro do prazo" — a resposta do Max, mesmo fundamentada, é genérica ("aguarde mais um pouco"), porque o sistema não coleta nem retém dados específicos do pedido (região, data de compra) durante a conversa. Resolver isso exigiria o modelo perguntar essas informações e, mais importante, extraí-las de forma estruturada (não só texto livre) para permitir um cálculo real de data. Não implementado agora por abrir escopo novo (extração estruturada + lógica de cálculo), fora do que uma regra de conteúdo ou prompt resolveria sozinho. Fica planejado para quando `structured output` (Pydantic, JSON mode) for estudado, conforme o roadmap de estudos.
+
+---
+
+# Parte 2 — Experimento de escala: migração para base em PDF
+
+## 17. Migração da base de conhecimento para PDF: extração estrutural via metadados de fonte
+
+Este experimento realiza o item "base de conhecimento maior via PDF", mencionado na Seção 16 como parte do roadmap de estudos ligado a query rewriting e HyDE — a decisão de reavaliar essas técnicas "quando a base de conhecimento for expandida" pressupõe justamente o trabalho documentado aqui.
+
+### Contexto
+
+Todas as seções anteriores (1-16) documentam o comportamento do Max contra a base de conhecimento original, um `politicas.txt` de formato controlado, com seções separadas por linha em branco. Esta seção documenta o início da investigação de escala: substituir essa base por um PDF de 6 páginas (`politicas_xyz.pdf`), mais próximo de um documento real de produção — texto desordenado, capítulos com formatação inconsistente, uma tabela, e um capítulo "piloto" com estrutura visivelmente diferente do resto.
+
+O trabalho foi conduzido numa branch separada (`experimento-base-pdf`), preservando `politicas.txt` e o eval set de 26 casos intactos em `main` como referência de comparação.
+
+### Por que o splitter antigo não se aplica
+
+O `dividir_por_secao` original depende de `\n\n` como separador de seção — uma convenção que só existia porque o `.txt` foi escrito manualmente por mim, seguindo esse padrão. Um PDF processado por `pdfplumber.extract_text()` não preserva essa convenção: quebras de linha refletem a geometria da página, não a estrutura lógica do conteúdo. A inspeção da saída produzida por `extract_text()` confirmou essa hipótese antes da implementação do pipeline de chunking.
+
+### Extração: pdfplumber
+
+A biblioteca pdfplumber foi adotada porque separa `extract_text()`/`extract_words()` (texto corrido) de `extract_tables()` (extração geométrica de tabelas) — necessário porque o documento contém uma tabela de prazos por região (Capítulo 1).
+
+### Descoberta da hierarquia de heading: abordagem por metadado de fonte, não regex
+
+Duas abordagens foram avaliadas para identificar títulos de seção:
+
+- **Regex sobre padrão de numeração** ("1.1", "2.2"): descartada. O documento tem inconsistência real de formatação — a seção "3.3" aparece com ponto final ("3.3.") e um mini-título antes dela, diferente do padrão das demais seções do mesmo capítulo.
+- **Metadados de fonte** (tamanho + nome, via `extract_words(extra_attrs=['size', 'fontname'])`): escolhida. Sinal mais robusto porque não depende de como a numeração foi digitada.
+
+Metodologia de descoberta: extração de todas as palavras do documento com metadado de fonte, agrupamento por `(tamanho, fonte)` via `collections.Counter`, e inspeção de exemplos por perfil para confirmar a hipótese antes de qualquer regra de classificação. Resultado: 6 perfis distintos —
+
+| Perfil | Papel |
+|---|---|
+| (18.0, Helvetica-Bold) | Título do documento (H1) |
+| (15.0, Helvetica-Bold) | Título de capítulo (H2) |
+| (12.0, Helvetica-Bold) | Seção numerada (H3) |
+| (11.0, Helvetica-BoldOblique) | Run-in (subtítulo sem numeração própria, ex: "Modalidade expressa") |
+| (10.0, Helvetica) | Corpo do texto |
+| (9.0, Helvetica) | Conteúdo da tabela (candidato a tratamento via `extract_tables()`) |
+
+Essa distribuição evidencia que a hierarquia estrutural do documento está codificada principalmente nos metadados tipográficos, e não em convenções textuais como numeração ou espaçamento.
+
+A classificação foi implementada de forma dinâmica (perfil mais frequente = corpo; perfis maiores que o corpo, ordenados, = headings; o menor dos "maiores que o corpo" = run-in), sem valores hardcoded — decisão deliberada para que a lógica se adapte a mudanças futuras na base sem recalibração manual. O objetivo não foi resolver a extração para este PDF especificamente, mas para uma classe de documentos com convenções tipográficas semelhantes.
+
+### Estratégia de chunking: parent-child retrieval
+
+Avaliadas três abordagens de chunking estrutura-consciente: (1) reaplicar o splitter por tamanho fixo dentro de cada H3, (2) parent-child retrieval (child pequeno para embedding/busca, H3 inteiro como contexto retornado ao LLM), (3) chunking semântico ou assistido por LLM. A opção 3 foi descartada por custo/latência desnecessários dado que o documento tem estrutura de fonte confiável. Além do custo computacional, utilizar uma LLM para segmentar um documento cuja estrutura já pode ser inferida diretamente da tipografia introduziria uma fonte adicional de variabilidade sem benefício proporcional. Escolhida a opção 2 (parent-child), com H3 como limite do chunk-pai e run-in como limite do child.
+
+### Casos de borda identificados durante a implementação do agrupamento (`montar_chunks`)
+
+1. **Título fragmentado por palavra**: a lógica inicial abria um novo chunk a cada palavra de um heading multi-palavra, em vez de reconhecer a sequência como um único título. Corrigido comparando o perfil da palavra atual com o da anterior, concatenando quando idênticos.
+2. **H1/H2 virando chunk vazio**: capítulos e o título do documento, sem texto de corpo entre eles e o primeiro H3, geravam chunks sem conteúdo útil. Corrigido tratando apenas o heading de menor nível (H3) como limite de chunk; H1/H2 passaram a se acumular como contexto anexado ao próximo H3.
+3. **Contexto acumulando histórico indevidamente**: `contexto_atual` era uma lista que só crescia — chunks de capítulos posteriores carregavam todos os capítulos anteriores no contexto, não só o relativo. Corrigido trocando para um dicionário indexado por nível de heading, com sobrescrita (não acúmulo) a cada novo H2/H1.
+4. **Texto órfão entre H2 e o primeiro H3** (ex: parágrafo de abertura do Capítulo 2) vazava para o chunk da última seção do capítulo anterior. Corrigido com uma flag de estado (`aguardando_chunk`) que redireciona esse texto para o contexto do heading superior em vez do `chunk_atual` desatualizado.
+5. **Capítulo sem nenhuma seção numerada (Capítulo 6, piloto)**: por não ter H3 algum, seu conteúdo nunca disparava criação de chunk — o texto ficava preso em uma variável nunca lida, e seu run-in sobrescrevia inadvertidamente o `run_in_ativo` do último chunk H3 válido (contaminação cross-capítulo, sem erro visível). Corrigido com uma regra geral (não hardcoded para o Capítulo 6 especificamente): ao fechar um H2 que nunca teve H3 associado, seu título e corpo acumulados são promovidos a um chunk de fallback.
+
+### Limitação conhecida, não resolvida nesta sessão
+
+`run_in_ativo` captura apenas o último run-in encontrado antes do chunk fechar — em seções com múltiplos run-ins (ex: 3.2, ou o próprio Capítulo 6, que tem três subtítulos em maiúscula), apenas o último é preservado no metadado do chunk-pai. Isso é aceitável para o nível de contexto (pai), mas é justamente o problema que o split fino por run-in (child) deve resolver — ainda não implementado.
+
+### Resultado parcial
+
+Ao final desta etapa, o pipeline passou a reconstruir automaticamente a hierarquia lógica do documento a partir dos metadados tipográficos, produzindo chunks estruturais equivalentes às seções da base original em `.txt`, porém sem depender de convenções de formatação específicas do documento-fonte. Esse resultado estabelece a base necessária para a etapa seguinte, dedicada ao parent-child retrieval e ao tratamento especializado de tabelas.
+
+### Próximos passos (não implementados nesta sessão)
+
+- Extração da tabela via `extract_tables()`, com reconciliação por posição (coordenadas) para evitar duplicação entre texto corrido e conteúdo tabular — tratamento por linha (não por tabela inteira), dado o volume alto esperado de perguntas sobre prazo por região.
+- Split fino do child por run-in dentro de cada chunk H3, completando o parent-child retrieval.
