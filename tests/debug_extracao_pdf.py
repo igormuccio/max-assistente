@@ -6,15 +6,36 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def extrair_palavras(caminho_pdf):
+    palavras = []
+
     with pdfplumber.open(caminho_pdf) as pdf:
-        palavras = []
         for pagina in pdf.pages:
-            palavras.extend(pagina.extract_words(extra_attrs=['size', 'fontname']))
+            tabelas = pagina.find_tables()
+            palavras_pagina = pagina.extract_words(extra_attrs=['size', 'fontname'])
+
+            if not tabelas:
+                palavras.extend(palavras_pagina)
+                continue
+
+            tabela = tabelas[0]
+            top_tabela, bottom_tabela = tabela.bbox[1], tabela.bbox[3]
+
+            ja_inseriu_tabela = False
+            for palavra in palavras_pagina:
+                dentro_da_tabela = top_tabela <= palavra['top'] <= bottom_tabela
+
+                if not dentro_da_tabela:
+                    palavras.append(palavra)
+                elif not ja_inseriu_tabela:
+                    palavras.append({'tabela': tabela.extract(), 'top': top_tabela})
+                    ja_inseriu_tabela = True
+
     return palavras
 
 
 def identificar_perfis(palavras):
-    contagem = Counter((round(p['size'], 1), p['fontname']) for p in palavras)
+    palavras_com_fonte = [p for p in palavras if 'size' in p]
+    contagem = Counter((round(p['size'], 1), p['fontname']) for p in palavras_com_fonte)
     perfil_corpo = contagem.most_common(1)[0][0]
     tamanho_corpo = perfil_corpo[0]
 
@@ -38,6 +59,16 @@ def identificar_perfis(palavras):
         'run_in': perfil_run_in,
         'outros': outros_perfis
     }
+
+def formatar_linhas_tabela(tabela, titulo_secao):
+    cabecalho = tabela[0]
+    linhas_formatadas = []
+
+    for linha in tabela[1:]:
+        partes = [f"{cabecalho[i]}: {valor}" for i, valor in enumerate(linha) if valor]
+        linhas_formatadas.append(f"{titulo_secao}. " + '. '.join(partes) + '.')
+
+    return linhas_formatadas
 
 def montar_chunks(palavras, perfis):
     nivel_chunk = perfis['headings'][-1]
@@ -87,7 +118,20 @@ def montar_chunks(palavras, perfis):
             })
         filhos_h2_orfao = []
 
+    def inserir_filhos_tabela(dados_tabela):
+        titulo_secao_atual = chunk_atual['titulo'] if chunk_atual else titulo_por_nivel.get(nivel_h2, '')
+        linhas = formatar_linhas_tabela(dados_tabela, titulo_secao_atual)
+        destino = chunk_atual['filhos'] if (chunk_atual and teve_h3_no_h2_atual) else filhos_h2_orfao
+        for linha in linhas:
+            destino.append({'run_in': None, 'texto': [linha]})
+
     for palavra in palavras:
+        if 'tabela' in palavra:
+            fechar_filho_atual()
+            inserir_filhos_tabela(palavra['tabela'])
+            perfil_anterior = None
+            continue
+
         chave = (round(palavra['size'], 1), palavra['fontname'])
 
         if chave == nivel_chunk:
@@ -152,9 +196,31 @@ def buscar_perfil_por_texto(palavras, textos_procurados):
     return encontrados
 
 
+def explorar_tabelas(caminho_pdf):
+    with pdfplumber.open(caminho_pdf) as pdf:
+        for num_pagina, pagina in enumerate(pdf.pages, start=1):
+            tabelas = pagina.extract_tables()
+            if tabelas:
+                print(f"\n===== PÁGINA {num_pagina}: {len(tabelas)} TABELA(S) ENCONTRADA(S) =====")
+                for i, tabela in enumerate(tabelas, start=1):
+                    print(f"\n--- Tabela {i} ({len(tabela)} linhas) ---")
+                    for linha in tabela:
+                        print(linha)
+
+def testar_extracao_com_tabela(caminho_pdf):
+    palavras = extrair_palavras(caminho_pdf)
+
+    for i, item in enumerate(palavras):
+        if 'tabela' in item:
+            print(f"\n===== MARCADOR DE TABELA ENCONTRADO NO ÍNDICE {i} =====")
+            print(f"Palavra anterior: {palavras[i - 1]['text']}")
+            print(f"Palavra seguinte: {palavras[i + 1]['text']}")
+            print(f"Dados brutos da tabela: {item['tabela']}")
+
 if __name__ == '__main__':
     MOSTRAR_CHUNKS = True
     MOSTRAR_BUSCA_DIRIGIDA = False
+    MOSTRAR_TABELAS = True
 
     caminho_pdf = os.path.join(BASE_DIR, 'data', 'politicas_xyz.pdf')
 
@@ -187,3 +253,6 @@ if __name__ == '__main__':
             print(f"\n'{texto}' encontrado em:")
             for texto_real, perfil in ocorrencias:
                 print(f"  {texto_real} -> {perfil}")
+
+    if MOSTRAR_TABELAS:
+        explorar_tabelas(caminho_pdf)
