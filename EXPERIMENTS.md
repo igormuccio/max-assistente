@@ -736,15 +736,26 @@ Avaliadas três abordagens de chunking estrutura-consciente: (1) reaplicar o spl
 4. **Texto órfão entre H2 e o primeiro H3** (ex: parágrafo de abertura do Capítulo 2) vazava para o chunk da última seção do capítulo anterior. Corrigido com uma flag de estado (`aguardando_chunk`) que redireciona esse texto para o contexto do heading superior em vez do `chunk_atual` desatualizado.
 5. **Capítulo sem nenhuma seção numerada (Capítulo 6, piloto)**: por não ter H3 algum, seu conteúdo nunca disparava criação de chunk — o texto ficava preso em uma variável nunca lida, e seu run-in sobrescrevia inadvertidamente o `run_in_ativo` do último chunk H3 válido (contaminação cross-capítulo, sem erro visível). Corrigido com uma regra geral (não hardcoded para o Capítulo 6 especificamente): ao fechar um H2 que nunca teve H3 associado, seu título e corpo acumulados são promovidos a um chunk de fallback.
 
-### Limitação conhecida, não resolvida nesta sessão
+### Limitação identificada nesta etapa (resolvida na etapa seguinte, abaixo)
 
-`run_in_ativo` captura apenas o último run-in encontrado antes do chunk fechar — em seções com múltiplos run-ins (ex: 3.2, ou o próprio Capítulo 6, que tem três subtítulos em maiúscula), apenas o último é preservado no metadado do chunk-pai. Isso é aceitável para o nível de contexto (pai), mas é justamente o problema que o split fino por run-in (child) deve resolver — ainda não implementado.
+Na primeira versão do agrupamento, `run_in_ativo` capturava apenas o último run-in encontrado antes do chunk fechar — em seções com múltiplos run-ins (ex: 3.2, ou o próprio Capítulo 6, que tem três subtítulos em maiúscula), apenas o último era preservado no metadado do chunk-pai. Aceitável para o nível de contexto (pai), mas era justamente o problema que o split fino por run-in (child) precisava resolver.
+
+### Split fino do child por run-in: completando o parent-child retrieval
+
+Com a hierarquia de chunks-pai (H3) validada, a etapa seguinte implementou a metade que faltava do parent-child retrieval: subdividir o `texto` de cada chunk-pai em uma lista de **filhos**, um por run-in — em vez de uma lista única de palavras com apenas o último `run_in_ativo` registrado.
+
+**Estrutura de dados adotada:** cada chunk-pai passou a carregar `'filhos': [...]`, uma lista de blocos `{'run_in': título_ou_None, 'texto': [...]}`. O primeiro filho de cada chunk-pai tem `run_in: None` — representa o texto de abertura da seção, antes de qualquer sub-assunto (run-in) aparecer. Cada run-in encontrado fecha o filho anterior e abre um novo, usando o mesmo princípio de "variável de trabalho que sempre existe" já usado para `chunk_atual` na etapa de heading.
+
+**Bug exposto por essa mudança — Capítulo 6 voltou a perder conteúdo:** a primeira versão do split fino zerou os filhos do Capítulo 6 (`0 filho(s)`), reintroduzindo — por um mecanismo novo — o mesmo tipo de perda de dado já corrigido na etapa anterior para esse capítulo. Causa: a flag `aguardando_chunk` só virava `False` ao encontrar um H3, e o Capítulo 6 não tem H3 nenhum; como resultado, todo o texto de corpo do capítulo (mesmo depois de um run-in) continuava caindo no branch de "contexto acumulado" em vez de virar `texto` de um filho. Corrigido fazendo o run-in também destravar `aguardando_chunk`, e ajustando `fechar_h2_sem_h3()` para promover o texto de abertura acumulado (antes do primeiro run-in) ao primeiro filho do chunk de fallback, em vez de descartá-lo. `corpo_por_nivel` também foi convertido de string concatenada para lista de palavras, para servir tanto o contexto de chunks normais quanto o texto de filhos do chunk de fallback com a mesma estrutura de dado.
+
+**Resultado validado:** rodando o agrupamento atualizado contra os 15 chunks do documento, o Capítulo 6 passou a produzir corretamente 4 filhos (texto de abertura + os três run-ins em maiúscula — "PRAZOS INTERNACIONAIS", "EXTRAVIO EM ENVIO INTERNACIONAL...", "REEMBOLSO — TRIBUTOS E TAXAS ALFANDEGÁRIAS"), e seções com múltiplos run-ins em capítulos normais (1.1, 1.2, 2.2, 3.2, 4.1, 5.2) também passaram a preservar todos os seus run-ins como filhos distintos, em vez de só o último.
+
+Com isso, o parent-child retrieval está estruturalmente completo: cada chunk-pai carrega contexto + título + uma lista de filhos, prontos para virar unidades individuais de embedding/busca, com o pai disponível para ser devolvido como contexto completo ao LLM na geração.
 
 ### Resultado parcial
 
-Ao final desta etapa, o pipeline passou a reconstruir automaticamente a hierarquia lógica do documento a partir dos metadados tipográficos, produzindo chunks estruturais equivalentes às seções da base original em `.txt`, porém sem depender de convenções de formatação específicas do documento-fonte. Esse resultado estabelece a base necessária para a etapa seguinte, dedicada ao parent-child retrieval e ao tratamento especializado de tabelas.
+Ao final desta etapa, o pipeline passou a reconstruir automaticamente a hierarquia lógica do documento a partir dos metadados tipográficos, produzindo chunks estruturais equivalentes às seções da base original em `.txt`, porém sem depender de convenções de formatação específicas do documento-fonte — e com a subdivisão em filhos (parent-child) já funcional. Esse resultado estabelece a base necessária para a etapa seguinte, dedicada ao tratamento especializado da tabela.
 
 ### Próximos passos (não implementados nesta sessão)
 
 - Extração da tabela via `extract_tables()`, com reconciliação por posição (coordenadas) para evitar duplicação entre texto corrido e conteúdo tabular — tratamento por linha (não por tabela inteira), dado o volume alto esperado de perguntas sobre prazo por região.
-- Split fino do child por run-in dentro de cada chunk H3, completando o parent-child retrieval.
