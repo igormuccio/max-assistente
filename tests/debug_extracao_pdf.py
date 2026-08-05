@@ -39,7 +39,6 @@ def identificar_perfis(palavras):
         'outros': outros_perfis
     }
 
-
 def montar_chunks(palavras, perfis):
     nivel_chunk = perfis['headings'][-1]
     niveis_contexto = perfis['headings'][:-1]
@@ -48,31 +47,45 @@ def montar_chunks(palavras, perfis):
     chunks = []
     chunk_atual = None
     titulo_por_nivel = {nivel: '' for nivel in niveis_contexto}
-    corpo_por_nivel = {nivel: '' for nivel in niveis_contexto}
+    corpo_por_nivel = {nivel: [] for nivel in niveis_contexto}
     perfil_anterior = None
     aguardando_chunk = True
     teve_h3_no_h2_atual = True
-    run_in_orfao = None
 
-    def contexto_atual_formatado(ate_nivel=None):
-        niveis = niveis_contexto if ate_nivel is None else niveis_contexto[:-1]
+    filhos_h2_orfao = []
+    filho_atual = {'run_in': None, 'texto': []}
+
+    def contexto_atual_formatado(excluir_h2=False):
+        niveis = niveis_contexto[:-1] if excluir_h2 else niveis_contexto
         resultado = []
         for nivel in niveis:
             texto = titulo_por_nivel[nivel]
             if corpo_por_nivel[nivel]:
-                texto += ' ' + corpo_por_nivel[nivel]
+                texto += ' ' + ' '.join(corpo_por_nivel[nivel])
             if texto:
                 resultado.append(texto.strip())
         return resultado
 
+    def fechar_filho_atual():
+        nonlocal filho_atual
+        if filho_atual['texto']:
+            destino = chunk_atual['filhos'] if (chunk_atual and teve_h3_no_h2_atual) else filhos_h2_orfao
+            destino.append(filho_atual)
+        filho_atual = {'run_in': None, 'texto': []}
+
     def fechar_h2_sem_h3():
+        nonlocal filhos_h2_orfao
         if not teve_h3_no_h2_atual and titulo_por_nivel.get(nivel_h2):
+            filhos = []
+            if corpo_por_nivel.get(nivel_h2):
+                filhos.append({'run_in': None, 'texto': corpo_por_nivel[nivel_h2]})
+            filhos.extend(filhos_h2_orfao)
             chunks.append({
-                'contexto': contexto_atual_formatado(ate_nivel=True),
+                'contexto': contexto_atual_formatado(excluir_h2=True),
                 'titulo': titulo_por_nivel[nivel_h2],
-                'texto': [corpo_por_nivel[nivel_h2]] if corpo_por_nivel[nivel_h2] else [],
-                'run_in_ativo': run_in_orfao
+                'filhos': filhos
             })
+        filhos_h2_orfao = []
 
     for palavra in palavras:
         chave = (round(palavra['size'], 1), palavra['fontname'])
@@ -82,50 +95,52 @@ def montar_chunks(palavras, perfis):
             if chave == perfil_anterior:
                 chunk_atual['titulo'] += ' ' + palavra['text']
             else:
+                fechar_filho_atual()
                 if chunk_atual:
                     chunks.append(chunk_atual)
                 chunk_atual = {
                     'contexto': contexto_atual_formatado(),
                     'titulo': palavra['text'],
-                    'texto': [],
-                    'run_in_ativo': None
+                    'filhos': []
                 }
                 aguardando_chunk = False
 
         elif chave in niveis_contexto:
             if chave == nivel_h2 and chave != perfil_anterior:
+                fechar_filho_atual()
                 fechar_h2_sem_h3()
                 teve_h3_no_h2_atual = False
-                run_in_orfao = None
 
             if chave == perfil_anterior:
                 titulo_por_nivel[chave] += ' ' + palavra['text']
             else:
                 titulo_por_nivel[chave] = palavra['text']
-                corpo_por_nivel[chave] = ''
+                corpo_por_nivel[chave] = []
             aguardando_chunk = True
 
         elif chave == perfis['run_in']:
-            if teve_h3_no_h2_atual and chunk_atual:
-                chunk_atual['run_in_ativo'] = palavra['text']
-            elif not teve_h3_no_h2_atual:
-                run_in_orfao = palavra['text']
+            if chave == perfil_anterior:
+                filho_atual['run_in'] += ' ' + palavra['text']
+            else:
+                fechar_filho_atual()
+                filho_atual['run_in'] = palavra['text']
+            aguardando_chunk = False
 
         else:
             if aguardando_chunk:
                 ultimo_nivel = max(titulo_por_nivel, key=lambda n: niveis_contexto.index(n))
-                corpo_por_nivel[ultimo_nivel] += ' ' + palavra['text']
-            elif chunk_atual:
-                chunk_atual['texto'].append(palavra['text'])
+                corpo_por_nivel[ultimo_nivel].append(palavra['text'])
+            else:
+                filho_atual['texto'].append(palavra['text'])
 
         perfil_anterior = chave
 
+    fechar_filho_atual()
     if chunk_atual:
         chunks.append(chunk_atual)
     fechar_h2_sem_h3()
 
     return chunks
-
 
 def buscar_perfil_por_texto(palavras, textos_procurados):
     encontrados = {texto: [] for texto in textos_procurados}
@@ -157,12 +172,14 @@ if __name__ == '__main__':
     if MOSTRAR_CHUNKS:
         print(f"\n===== {len(chunks)} CHUNKS CRIADOS =====")
         for i, chunk in enumerate(chunks, start=1):
-            texto_completo = ' '.join(chunk['texto'])
             print(f"\n--- Chunk {i} ---")
             print(f"Contexto: {chunk['contexto']}")
             print(f"Título: {chunk['titulo']}")
-            print(f"Run-in ativo: {chunk['run_in_ativo']}")
-            print(f"Texto ({len(texto_completo)} caracteres): {texto_completo[:200]}...")
+            print(f"{len(chunk['filhos'])} filho(s):")
+            for j, filho in enumerate(chunk['filhos'], start=1):
+                texto_filho = ' '.join(filho['texto'])
+                print(f"  Filho {j} | run-in: {filho['run_in']} | {len(texto_filho)} caracteres")
+                print(f"    {texto_filho[:150]}...")
 
     if MOSTRAR_BUSCA_DIRIGIDA:
         alvos = buscar_perfil_por_texto(palavras, ['PRAZOS', 'INTERNACIONAIS', 'EXTRAVIO'])
