@@ -752,10 +752,86 @@ Com a hierarquia de chunks-pai (H3) validada, a etapa seguinte implementou a met
 
 Com isso, o parent-child retrieval está estruturalmente completo: cada chunk-pai carrega contexto + título + uma lista de filhos, prontos para virar unidades individuais de embedding/busca, com o pai disponível para ser devolvido como contexto completo ao LLM na geração.
 
-### Resultado parcial
+### Extração e reconciliação da tabela por posição
 
-Ao final desta etapa, o pipeline passou a reconstruir automaticamente a hierarquia lógica do documento a partir dos metadados tipográficos, produzindo chunks estruturais equivalentes às seções da base original em `.txt`, porém sem depender de convenções de formatação específicas do documento-fonte — e com a subdivisão em filhos (parent-child) já funcional. Esse resultado estabelece a base necessária para a etapa seguinte, dedicada ao tratamento especializado da tabela.
+Com o parent-child validado, a última peça pendente era o tratamento da tabela de prazos por região (Capítulo 1) — identificada como caso crítico por ser, em tese, um dos maiores volumes de pergunta real de usuário (prazo por região).
 
-### Próximos passos (não implementados nesta sessão)
+**Exploração inicial:** `page.extract_tables()` foi testado isoladamente antes de qualquer lógica de reconciliação, confirmando a forma bruta dos dados — uma lista de linhas, cada linha uma lista de células, com o cabeçalho (`['Região', 'Prazo padrão', 'Prazo expresso']`) na primeira posição.
 
-- Extração da tabela via `extract_tables()`, com reconciliação por posição (coordenadas) para evitar duplicação entre texto corrido e conteúdo tabular — tratamento por linha (não por tabela inteira), dado o volume alto esperado de perguntas sobre prazo por região.
+**Formatação de cada linha como child independente:** decisão já estabelecida em sessão anterior — cada linha da tabela vira um child próprio (não a tabela inteira), para que o embedding de cada região carregue sinal quase puro daquela região, evitando a diluição semântica que aconteceria se as quatro regiões fossem embutidas num único vetor.
+
+```python
+def formatar_linhas_tabela(tabela, titulo_secao):
+    cabecalho = tabela[0]
+    linhas_formatadas = []
+
+    for linha in tabela[1:]:
+        partes = [f"{cabecalho[i]}: {valor}" for i, valor in enumerate(linha) if valor]
+        linhas_formatadas.append(f"{titulo_secao}. " + '. '.join(partes) + '.')
+
+    return linhas_formatadas
+```
+
+Cada linha formatada usa o cabeçalho como rótulo por célula (`"Região: Sul. Prazo padrão: 3 a 4 dias úteis. Prazo expresso: 2 dias úteis."`), prefixada com o título da seção de origem (*chunk enrichment*, mesma técnica já usada na Seção 12.4) — garantindo que cada linha seja autossuficiente mesmo isolada do chunk-pai.
+
+**Decisão consciente de manter a numeração do título ("1.1") no prefixo:** identificado como ruído semântico puro para o embedding (o projeto não usa essa numeração como referência ou citação em nenhum outro ponto do pipeline), mas mantido por decisão deliberada de custo-benefício — o ganho de removê-lo (poucos tokens) não justificou o custo de engenharia associado (uma implementação sem dependência nova adicionava complexidade ao código para um problema de impacto mínimo). Avaliada e descartada a opção via `import re`, especificamente pelo princípio já aplicado no restante do projeto de não empilhar imports desnecessários quando o ganho é marginal.
+
+**Reconciliação por posição:** o problema central — `extract_words()` e `extract_tables()` operam de forma cega um ao outro, então usá-los em paralelo sem reconciliação duplicaria o conteúdo da tabela (uma vez bagunçado, dentro do texto corrido; outra vez estruturado). A solução adotada usa `page.find_tables()` (variante de `extract_tables()` que expõe `.bbox`, a caixa delimitadora da tabela) para obter a faixa vertical (`top`/`bottom`) onde a tabela vive na página, e comparar essa faixa contra a posição (`top`) de cada palavra devolvida por `extract_words()`.
+
+```python
+def extrair_palavras(caminho_pdf):
+    palavras = []
+
+    with pdfplumber.open(caminho_pdf) as pdf:
+        for pagina in pdf.pages:
+            tabelas = pagina.find_tables()
+            palavras_pagina = pagina.extract_words(extra_attrs=['size', 'fontname'])
+
+            if not tabelas:
+                palavras.extend(palavras_pagina)
+                continue
+
+            tabela = tabelas[0]
+            top_tabela, bottom_tabela = tabela.bbox[1], tabela.bbox[3]
+
+            ja_inseriu_tabela = False
+            for palavra in palavras_pagina:
+                dentro_da_tabela = top_tabela <= palavra['top'] <= bottom_tabela
+
+                if not dentro_da_tabela:
+                    palavras.append(palavra)
+                elif not ja_inseriu_tabela:
+                    palavras.append({'tabela': tabela.extract(), 'top': top_tabela})
+                    ja_inseriu_tabela = True
+
+    return palavras
+```
+
+Palavras fora da faixa da tabela entram normalmente na lista; palavras dentro da faixa são descartadas, e um marcador único (`{'tabela': ..., 'top': ...}`) é inserido no lugar delas, na posição correta da sequência — preservando a ordem de leitura do documento sem duplicar conteúdo.
+
+**Decisão de arquitetura — reconciliação na função de extração, formatação em `montar_chunks`:** uma primeira tentativa formatava e "fingia" a tabela como uma palavra de run-in já dentro de `extrair_palavras()`, mas essa função não tem acesso ao título da seção corrente (informação que só `montar_chunks()` acumula durante seu próprio processamento). A solução final mantém `extrair_palavras()` responsável só por marcar onde a tabela está, e delega a `montar_chunks()` — que já sabe o título da seção ativa a cada ponto do loop — a responsabilidade de formatar e inserir os filhos correspondentes.
+
+```python
+def inserir_filhos_tabela(dados_tabela):
+    titulo_secao_atual = chunk_atual['titulo'] if chunk_atual else titulo_por_nivel.get(nivel_h2, '')
+    linhas = formatar_linhas_tabela(dados_tabela, titulo_secao_atual)
+    destino = chunk_atual['filhos'] if (chunk_atual and teve_h3_no_h2_atual) else filhos_h2_orfao
+    for linha in linhas:
+        destino.append({'run_in': None, 'texto': [linha]})
+```
+
+No loop principal de `montar_chunks`, o marcador de tabela é interceptado **antes** de qualquer outra checagem (`if 'tabela' in palavra:`), já que ele não tem os campos `size`/`fontname` que o restante do loop assume presentes — tentar acessá-los geraria `KeyError`.
+
+**Bug exposto pela integração — funções auxiliares assumindo lista homogênea:** ao rodar a integração completa, `identificar_perfis()` (escrita antes da existência do marcador de tabela) quebrou com `KeyError: 'size'`, porque itera a lista de `palavras` inteira presumindo que todo item tem esse campo — suposição que deixou de ser verdadeira no momento em que `extrair_palavras()` passou a inserir um tipo de item diferente na mesma lista. Corrigido filtrando o marcador logo no início da função (`palavras_com_fonte = [p for p in palavras if 'size' in p]`), antes de qualquer contagem. Padrão a ter em mente: qualquer função futura que itere `palavras` diretamente precisa da mesma proteção, já que a lista deixou de ser homogênea.
+
+**Resultado validado:** rodando o pipeline completo contra o PDF, o chunk da seção 1.1 passou de 2 para 6 filhos — o filho de abertura, as 4 linhas de tabela (uma por região, com o prefixo "1.1 Prazos de entrega por região" preservado) inseridas exatamente na posição onde a tabela aparece no documento original, e o filho "Modalidade expressa" na sequência correta logo em seguida. Os demais 14 chunks permaneceram idênticos aos já validados, confirmando que a mudança não teve efeito colateral fora da seção que de fato contém tabela.
+
+Com isso, as duas pendências da Seção 17 (split fino por run-in e tratamento de tabela) estão implementadas e validadas.
+
+### Resultado final
+
+Ao final desta etapa, o pipeline passou a reconstruir automaticamente a hierarquia lógica do documento a partir dos metadados tipográficos — incluindo tratamento dedicado para conteúdo tabular, reconciliado por posição para não duplicar informação — produzindo uma estrutura parent-child completa (chunk-pai por seção H3, filhos por run-in e por linha de tabela), sem depender de convenções de formatação específicas do documento-fonte nem de valores hardcoded.
+
+### Próximos passos
+
+- Nenhuma pendência estrutural em aberto para a extração do PDF em si. Etapas futuras envolveriam integrar esse pipeline ao `inicializacao.py` de produção (hoje ele existe isolado em `tests/debug_extracao_pdf.py`, como scaffold de validação) e recalibrar `score_threshold`/`chunk_size` contra a base em PDF, retomando a decisão de query rewriting/HyDE já registrada na Seção 16 — agora com uma base de conhecimento maior disponível para esse teste.
