@@ -21,6 +21,12 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [15. Conclusões gerais](#15-conclusões-gerais)
 - [16. Próximos passos identificados (não implementados ainda)](#16-próximos-passos-identificados-não-implementados-ainda)
 
+---
+
+# Parte 2 — Experimento de escala: migração para base em PDF
+
+- [17. Migração da base de conhecimento para PDF: extração estrutural via metadados de fonte](#17-migração-da-base-de-conhecimento-para-pdf-extração-estrutural-via-metadados-de-fonte)
+
 ## 1. Por que RAG neste projeto
 
 O Max responde perguntas sobre políticas de uma empresa fictícia de entregas. Um LLM genérico não tem conhecimento sobre essas políticas — sem RAG, ele responderia com base em suposições (alucinação) ou se recusaria a responder. RAG resolve isso buscando, a cada pergunta, apenas o trecho relevante da base de conhecimento e injetando esse trecho no prompt, em vez de:
@@ -673,3 +679,251 @@ Ordenados pela sequência de cobertura planejada, não pela ordem de descoberta.
   Não implementado agora: testar isso de forma significativa exigiria criar cenários de conversa longa manualmente, o que não compensa o esforço no estágio atual do projeto — mais sensato avaliar quando houver uma base de conhecimento maior e um processo de testes automatizados em vigor (eval set, e possivelmente os frameworks descritos acima), em vez de simular manualmente conversas extensas agora. Corresponde à Fase 3 do roadmap de estudos ("Memória de conversa"). Assim como as demais decisões de custo deste documento, essa é uma escolha calibrada para o volume de uso de um projeto de estudos; em produção, com conversas mais longas e recorrentes, o mesmo problema deixaria de ser tolerável e a implementação de uma das duas abordagens passaria a ser necessária, não opcional.
 - **Detecção de mensagens fragmentadas ou incompletas:** cenário identificado na Seção 11, mas não implementado por exigir julgamento semântico (provavelmente via LLM), reintroduzindo custo de chamada por mensagem recebida.
 - **Cálculo de prazo restante personalizado (ex.: "falta 1 dia até o pedido entrar em atraso"):** identificado ao testar a nova regra de "atraso dentro do prazo" — a resposta do Max, mesmo fundamentada, é genérica ("aguarde mais um pouco"), porque o sistema não coleta nem retém dados específicos do pedido (região, data de compra) durante a conversa. Resolver isso exigiria o modelo perguntar essas informações e, mais importante, extraí-las de forma estruturada (não só texto livre) para permitir um cálculo real de data. Não implementado agora por abrir escopo novo (extração estruturada + lógica de cálculo), fora do que uma regra de conteúdo ou prompt resolveria sozinho. Fica planejado para quando `structured output` (Pydantic, JSON mode) for estudado, conforme o roadmap de estudos.
+
+---
+
+# Parte 2 — Experimento de escala: migração para base em PDF
+
+## 17. Migração da base de conhecimento para PDF: extração estrutural via metadados de fonte
+
+Este experimento realiza o item "base de conhecimento maior via PDF", mencionado na Seção 16 como parte do roadmap de estudos ligado a query rewriting e HyDE — a decisão de reavaliar essas técnicas "quando a base de conhecimento for expandida" pressupõe justamente o trabalho documentado aqui.
+
+### Contexto
+
+Todas as seções anteriores (1-16) documentam o comportamento do Max contra a base de conhecimento original, um `politicas.txt` de formato controlado, com seções separadas por linha em branco. Esta seção documenta o início da investigação de escala: substituir essa base por um PDF de 6 páginas (`politicas_xyz.pdf`), mais próximo de um documento real de produção — texto desordenado, capítulos com formatação inconsistente, uma tabela, e um capítulo "piloto" com estrutura visivelmente diferente do resto.
+
+O trabalho foi conduzido numa branch separada (`experimento-base-pdf`), preservando `politicas.txt` e o eval set de 26 casos intactos em `main` como referência de comparação.
+
+### Por que o splitter antigo não se aplica
+
+O `dividir_por_secao` original depende de `\n\n` como separador de seção — uma convenção que só existia porque o `.txt` foi escrito manualmente por mim, seguindo esse padrão. Um PDF processado por `pdfplumber.extract_text()` não preserva essa convenção: quebras de linha refletem a geometria da página, não a estrutura lógica do conteúdo. A inspeção da saída produzida por `extract_text()` confirmou essa hipótese antes da implementação do pipeline de chunking.
+
+### Extração: pdfplumber
+
+A biblioteca pdfplumber foi adotada porque separa `extract_text()`/`extract_words()` (texto corrido) de `extract_tables()` (extração geométrica de tabelas) — necessário porque o documento contém uma tabela de prazos por região (Capítulo 1).
+
+### Descoberta da hierarquia de heading: abordagem por metadado de fonte, não regex
+
+Duas abordagens foram avaliadas para identificar títulos de seção:
+
+- **Regex sobre padrão de numeração** ("1.1", "2.2"): descartada. O documento tem inconsistência real de formatação — a seção "3.3" aparece com ponto final ("3.3.") e um mini-título antes dela, diferente do padrão das demais seções do mesmo capítulo.
+- **Metadados de fonte** (tamanho + nome, via `extract_words(extra_attrs=['size', 'fontname'])`): escolhida. Sinal mais robusto porque não depende de como a numeração foi digitada.
+
+Metodologia de descoberta: extração de todas as palavras do documento com metadado de fonte, agrupamento por `(tamanho, fonte)` via `collections.Counter`, e inspeção de exemplos por perfil para confirmar a hipótese antes de qualquer regra de classificação. Resultado: 6 perfis distintos —
+
+| Perfil | Papel |
+|---|---|
+| (18.0, Helvetica-Bold) | Título do documento (H1) |
+| (15.0, Helvetica-Bold) | Título de capítulo (H2) |
+| (12.0, Helvetica-Bold) | Seção numerada (H3) |
+| (11.0, Helvetica-BoldOblique) | Run-in (subtítulo sem numeração própria, ex: "Modalidade expressa") |
+| (10.0, Helvetica) | Corpo do texto |
+| (9.0, Helvetica) | Conteúdo da tabela (candidato a tratamento via `extract_tables()`) |
+
+Essa distribuição evidencia que a hierarquia estrutural do documento está codificada principalmente nos metadados tipográficos, e não em convenções textuais como numeração ou espaçamento.
+
+A classificação foi implementada de forma dinâmica (perfil mais frequente = corpo; perfis maiores que o corpo, ordenados, = headings; o menor dos "maiores que o corpo" = run-in), sem valores hardcoded — decisão deliberada para que a lógica se adapte a mudanças futuras na base sem recalibração manual. O objetivo não foi resolver a extração para este PDF especificamente, mas para uma classe de documentos com convenções tipográficas semelhantes.
+
+### Estratégia de chunking: parent-child retrieval
+
+Avaliadas três abordagens de chunking estrutura-consciente: (1) reaplicar o splitter por tamanho fixo dentro de cada H3, (2) parent-child retrieval (child pequeno para embedding/busca, H3 inteiro como contexto retornado ao LLM), (3) chunking semântico ou assistido por LLM. A opção 3 foi descartada por custo/latência desnecessários dado que o documento tem estrutura de fonte confiável. Além do custo computacional, utilizar uma LLM para segmentar um documento cuja estrutura já pode ser inferida diretamente da tipografia introduziria uma fonte adicional de variabilidade sem benefício proporcional. Escolhida a opção 2 (parent-child), com H3 como limite do chunk-pai e run-in como limite do child.
+
+### Casos de borda identificados durante a implementação do agrupamento (`montar_chunks`)
+
+1. **Título fragmentado por palavra**: a lógica inicial abria um novo chunk a cada palavra de um heading multi-palavra, em vez de reconhecer a sequência como um único título. Corrigido comparando o perfil da palavra atual com o da anterior, concatenando quando idênticos.
+2. **H1/H2 virando chunk vazio**: capítulos e o título do documento, sem texto de corpo entre eles e o primeiro H3, geravam chunks sem conteúdo útil. Corrigido tratando apenas o heading de menor nível (H3) como limite de chunk; H1/H2 passaram a se acumular como contexto anexado ao próximo H3.
+3. **Contexto acumulando histórico indevidamente**: `contexto_atual` era uma lista que só crescia — chunks de capítulos posteriores carregavam todos os capítulos anteriores no contexto, não só o relativo. Corrigido trocando para um dicionário indexado por nível de heading, com sobrescrita (não acúmulo) a cada novo H2/H1.
+4. **Texto órfão entre H2 e o primeiro H3** (ex: parágrafo de abertura do Capítulo 2) vazava para o chunk da última seção do capítulo anterior. Corrigido com uma flag de estado (`aguardando_chunk`) que redireciona esse texto para o contexto do heading superior em vez do `chunk_atual` desatualizado.
+5. **Capítulo sem nenhuma seção numerada (Capítulo 6, piloto)**: por não ter H3 algum, seu conteúdo nunca disparava criação de chunk — o texto ficava preso em uma variável nunca lida, e seu run-in sobrescrevia inadvertidamente o `run_in_ativo` do último chunk H3 válido (contaminação cross-capítulo, sem erro visível). Corrigido com uma regra geral (não hardcoded para o Capítulo 6 especificamente): ao fechar um H2 que nunca teve H3 associado, seu título e corpo acumulados são promovidos a um chunk de fallback.
+
+### Limitação identificada nesta etapa (resolvida na etapa seguinte, abaixo)
+
+Na primeira versão do agrupamento, `run_in_ativo` capturava apenas o último run-in encontrado antes do chunk fechar — em seções com múltiplos run-ins (ex: 3.2, ou o próprio Capítulo 6, que tem três subtítulos em maiúscula), apenas o último era preservado no metadado do chunk-pai. Aceitável para o nível de contexto (pai), mas era justamente o problema que o split fino por run-in (child) precisava resolver.
+
+### Split fino do child por run-in: completando o parent-child retrieval
+
+Com a hierarquia de chunks-pai (H3) validada, a etapa seguinte implementou a metade que faltava do parent-child retrieval: subdividir o `texto` de cada chunk-pai em uma lista de **filhos**, um por run-in — em vez de uma lista única de palavras com apenas o último `run_in_ativo` registrado.
+
+**Estrutura de dados adotada:** cada chunk-pai passou a carregar `'filhos': [...]`, uma lista de blocos `{'run_in': título_ou_None, 'texto': [...]}`. O primeiro filho de cada chunk-pai tem `run_in: None` — representa o texto de abertura da seção, antes de qualquer sub-assunto (run-in) aparecer. Cada run-in encontrado fecha o filho anterior e abre um novo, usando o mesmo princípio de "variável de trabalho que sempre existe" já usado para `chunk_atual` na etapa de heading.
+
+**Bug exposto por essa mudança — Capítulo 6 voltou a perder conteúdo:** a primeira versão do split fino zerou os filhos do Capítulo 6 (`0 filho(s)`), reintroduzindo — por um mecanismo novo — o mesmo tipo de perda de dado já corrigido na etapa anterior para esse capítulo. Causa: a flag `aguardando_chunk` só virava `False` ao encontrar um H3, e o Capítulo 6 não tem H3 nenhum; como resultado, todo o texto de corpo do capítulo (mesmo depois de um run-in) continuava caindo no branch de "contexto acumulado" em vez de virar `texto` de um filho. Corrigido fazendo o run-in também destravar `aguardando_chunk`, e ajustando `fechar_h2_sem_h3()` para promover o texto de abertura acumulado (antes do primeiro run-in) ao primeiro filho do chunk de fallback, em vez de descartá-lo. `corpo_por_nivel` também foi convertido de string concatenada para lista de palavras, para servir tanto o contexto de chunks normais quanto o texto de filhos do chunk de fallback com a mesma estrutura de dado.
+
+**Resultado validado:** rodando o agrupamento atualizado contra os 15 chunks do documento, o Capítulo 6 passou a produzir corretamente 4 filhos (texto de abertura + os três run-ins em maiúscula — "PRAZOS INTERNACIONAIS", "EXTRAVIO EM ENVIO INTERNACIONAL...", "REEMBOLSO — TRIBUTOS E TAXAS ALFANDEGÁRIAS"), e seções com múltiplos run-ins em capítulos normais (1.1, 1.2, 2.2, 3.2, 4.1, 5.2) também passaram a preservar todos os seus run-ins como filhos distintos, em vez de só o último.
+
+Com isso, o parent-child retrieval está estruturalmente completo: cada chunk-pai carrega contexto + título + uma lista de filhos, prontos para virar unidades individuais de embedding/busca, com o pai disponível para ser devolvido como contexto completo ao LLM na geração.
+
+### Extração e reconciliação da tabela por posição
+
+Com o parent-child validado, a última peça pendente era o tratamento da tabela de prazos por região (Capítulo 1) — identificada como caso crítico por ser, em tese, um dos maiores volumes de pergunta real de usuário (prazo por região).
+
+**Exploração inicial:** `page.extract_tables()` foi testado isoladamente antes de qualquer lógica de reconciliação, confirmando a forma bruta dos dados — uma lista de linhas, cada linha uma lista de células, com o cabeçalho (`['Região', 'Prazo padrão', 'Prazo expresso']`) na primeira posição.
+
+**Formatação de cada linha como child independente:** decisão já estabelecida em sessão anterior — cada linha da tabela vira um child próprio (não a tabela inteira), para que o embedding de cada região carregue sinal quase puro daquela região, evitando a diluição semântica que aconteceria se as quatro regiões fossem embutidas num único vetor.
+
+```python
+def formatar_linhas_tabela(tabela, titulo_secao):
+    cabecalho = tabela[0]
+    linhas_formatadas = []
+
+    for linha in tabela[1:]:
+        partes = [f"{cabecalho[i]}: {valor}" for i, valor in enumerate(linha) if valor]
+        linhas_formatadas.append(f"{titulo_secao}. " + '. '.join(partes) + '.')
+
+    return linhas_formatadas
+```
+
+Cada linha formatada usa o cabeçalho como rótulo por célula (`"Região: Sul. Prazo padrão: 3 a 4 dias úteis. Prazo expresso: 2 dias úteis."`), prefixada com o título da seção de origem (*chunk enrichment*, mesma técnica já usada na Seção 12.4) — garantindo que cada linha seja autossuficiente mesmo isolada do chunk-pai.
+
+**Atualização (integração em produção):** o prefixo de título deixou de ser aplicado dentro de `formatar_linhas_tabela` e foi centralizado na camada de conversão pai-filho (`formatar_texto_filho`), passando a cobrir também o filho de abertura de seção, que até então não tinha esse tratamento — ver "Correção de retrieval: título ausente no filho de abertura de seção", mais abaixo.
+
+**Decisão consciente de manter a numeração do título ("1.1") no prefixo:** identificado como ruído semântico puro para o embedding (o projeto não usa essa numeração como referência ou citação em nenhum outro ponto do pipeline), mas mantido por decisão deliberada de custo-benefício — o ganho de removê-lo (poucos tokens) não justificou o custo de engenharia associado (uma implementação sem dependência nova adicionava complexidade ao código para um problema de impacto mínimo). Avaliada e descartada a opção via `import re`, especificamente pelo princípio já aplicado no restante do projeto de não empilhar imports desnecessários quando o ganho é marginal.
+
+**Reconciliação por posição:** o problema central — `extract_words()` e `extract_tables()` operam de forma cega um ao outro, então usá-los em paralelo sem reconciliação duplicaria o conteúdo da tabela (uma vez bagunçado, dentro do texto corrido; outra vez estruturado). A solução adotada usa `page.find_tables()` (variante de `extract_tables()` que expõe `.bbox`, a caixa delimitadora da tabela) para obter a faixa vertical (`top`/`bottom`) onde a tabela vive na página, e comparar essa faixa contra a posição (`top`) de cada palavra devolvida por `extract_words()`.
+
+```python
+def extrair_palavras(caminho_pdf):
+    palavras = []
+
+    with pdfplumber.open(caminho_pdf) as pdf:
+        for pagina in pdf.pages:
+            tabelas = pagina.find_tables()
+            palavras_pagina = pagina.extract_words(extra_attrs=['size', 'fontname'])
+
+            if not tabelas:
+                palavras.extend(palavras_pagina)
+                continue
+
+            tabela = tabelas[0]
+            top_tabela, bottom_tabela = tabela.bbox[1], tabela.bbox[3]
+
+            ja_inseriu_tabela = False
+            for palavra in palavras_pagina:
+                dentro_da_tabela = top_tabela <= palavra['top'] <= bottom_tabela
+
+                if not dentro_da_tabela:
+                    palavras.append(palavra)
+                elif not ja_inseriu_tabela:
+                    palavras.append({'tabela': tabela.extract(), 'top': top_tabela})
+                    ja_inseriu_tabela = True
+
+    return palavras
+```
+
+Palavras fora da faixa da tabela entram normalmente na lista; palavras dentro da faixa são descartadas, e um marcador único (`{'tabela': ..., 'top': ...}`) é inserido no lugar delas, na posição correta da sequência — preservando a ordem de leitura do documento sem duplicar conteúdo.
+
+**Decisão de arquitetura — reconciliação na função de extração, formatação em `montar_chunks`:** uma primeira tentativa formatava e "fingia" a tabela como uma palavra de run-in já dentro de `extrair_palavras()`, mas essa função não tem acesso ao título da seção corrente (informação que só `montar_chunks()` acumula durante seu próprio processamento). A solução final mantém `extrair_palavras()` responsável só por marcar onde a tabela está, e delega a `montar_chunks()` — que já sabe o título da seção ativa a cada ponto do loop — a responsabilidade de formatar e inserir os filhos correspondentes.
+
+```python
+def inserir_filhos_tabela(dados_tabela):
+    titulo_secao_atual = chunk_atual['titulo'] if chunk_atual else titulo_por_nivel.get(nivel_h2, '')
+    linhas = formatar_linhas_tabela(dados_tabela, titulo_secao_atual)
+    destino = chunk_atual['filhos'] if (chunk_atual and teve_h3_no_h2_atual) else filhos_h2_orfao
+    for linha in linhas:
+        destino.append({'run_in': None, 'texto': [linha]})
+```
+
+No loop principal de `montar_chunks`, o marcador de tabela é interceptado **antes** de qualquer outra checagem (`if 'tabela' in palavra:`), já que ele não tem os campos `size`/`fontname` que o restante do loop assume presentes — tentar acessá-los geraria `KeyError`.
+
+**Bug exposto pela integração — funções auxiliares assumindo lista homogênea:** ao rodar a integração completa, `identificar_perfis()` (escrita antes da existência do marcador de tabela) quebrou com `KeyError: 'size'`, porque itera a lista de `palavras` inteira presumindo que todo item tem esse campo — suposição que deixou de ser verdadeira no momento em que `extrair_palavras()` passou a inserir um tipo de item diferente na mesma lista. Corrigido filtrando o marcador logo no início da função (`palavras_com_fonte = [p for p in palavras if 'size' in p]`), antes de qualquer contagem. Padrão a ter em mente: qualquer função futura que itere `palavras` diretamente precisa da mesma proteção, já que a lista deixou de ser homogênea.
+
+**Resultado validado:** rodando o pipeline completo contra o PDF, o chunk da seção 1.1 passou de 2 para 6 filhos — o filho de abertura, as 4 linhas de tabela (uma por região, com o prefixo "1.1 Prazos de entrega por região" preservado) inseridas exatamente na posição onde a tabela aparece no documento original, e o filho "Modalidade expressa" na sequência correta logo em seguida. Os demais 14 chunks permaneceram idênticos aos já validados, confirmando que a mudança não teve efeito colateral fora da seção que de fato contém tabela.
+
+Com isso, as duas pendências da Seção 17 (split fino por run-in e tratamento de tabela) estão implementadas e validadas.
+
+### Resultado final
+
+Ao final desta etapa, o pipeline passou a reconstruir automaticamente a hierarquia lógica do documento a partir dos metadados tipográficos — incluindo tratamento dedicado para conteúdo tabular, reconciliado por posição para não duplicar informação — produzindo uma estrutura parent-child completa (chunk-pai por seção H3, filhos por run-in e por linha de tabela), sem depender de convenções de formatação específicas do documento-fonte nem de valores hardcoded.
+
+### Integração em produção
+
+O pipeline validado em `tests/debug_extracao_pdf.py` foi promovido para `src/extracao_pdf.py`, mantendo a lógica de extração e chunking sem alterações de comportamento, e adicionando duas novas responsabilidades: conversão dos chunks pai-filho para `Document`s do LangChain, e a correção de retrieval descrita a seguir.
+
+### Correção de retrieval: título ausente no filho de abertura de seção
+
+O filho de abertura de cada seção (texto antes do primeiro run-in, `run_in: None`) não carregava nenhuma identificação da seção no próprio `page_content` — diferente das linhas de tabela, que já embutiam o título (seção anterior). Isso criava um ponto cego real: perguntas genéricas sobre a mecânica de uma regra (ex.: "os feriados contam como dia útil no prazo?") tendiam a cair nesse filho "solto", sem nenhuma palavra-chave da seção ajudando o embedding a ancorá-lo semanticamente.
+
+A correção centralizou o prefixo de título — antes só aplicado à tabela — para todo filho sem run-in, movendo essa responsabilidade para a camada de conversão (`formatar_texto_filho`), e removendo o prefixo manual de dentro de `formatar_linhas_tabela` para não duplicar.
+
+```python
+def formatar_texto_filho(filho, titulo_secao):
+    texto = ' '.join(filho['texto'])
+    if filho['run_in']:
+        return f"{filho['run_in']}: {texto}"
+    return f"{titulo_secao}. {texto}"
+```
+
+**Efeito colateral aceito e documentado:** o `page_content` do chunk-pai passou a ter o título ligeiramente duplicado (título do chunk + título repetido dentro do primeiro filho concatenado a ele). Irrelevante na prática, já que o pai nunca é embedado — só é devolvido como contexto para o LLM, onde a repetição não tem custo funcional.
+
+### Arquitetura de retrieval: ParentDocumentRetriever descartado em favor de retriever próprio
+
+Testado inicialmente com `langchain_classic.retrievers.ParentDocumentRetriever` + `LocalFileStore`, mas descartado antes de ir para produção:
+
+- `langchain_classic` é um pacote de compatibilidade separado, introduzido na reorganização do LangChain 1.0, com suporte limitado a correções de segurança até dezembro de 2026 — não é uma base recomendada para código novo.
+- A documentação atual do LangChain não cataloga mais `ParentDocumentRetriever` como estratégia de retrieval; trata "Retriever" como uma interface (`BaseRetriever`) a ser implementada por projeto, não uma classe pronta para cada padrão.
+- Confirmado por precedente real: a migração do pacote `langchain-mongodb` para LangChain 1.0 substituiu o uso de `ParentDocumentRetriever` por uma subclasse própria de `BaseRetriever`.
+
+Alternativas mapeadas antes da decisão final:
+
+| Abordagem | Onde é usada | Trade-off |
+|---|---|---|
+| `ParentDocumentRetriever` (langchain_classic) | Legado, ainda funcional | Pacote em manutenção, não desenvolvimento ativo |
+| `AutoMergingRetriever` (LlamaIndex) | Outro framework, ativamente mantido | Exigiria migrar o projeto inteiro de framework por causa de um único componente; comportamento de merge diferente (só promove o pai quando um número mínimo de filhos do mesmo pai aparece nos resultados, não qualquer um) |
+| Contexto do pai embutido no metadata do filho | Técnica sem dependência extra | Duplica o texto do pai N vezes dentro do índice vetorial (irrelevante em 6 páginas; escalaria mal em bases grandes) |
+| **Retriever próprio (`RetrieverPaiFilho`, escolhida)** | `BaseRetriever` do `langchain_core` (núcleo estável) | Mais código para manter, mas controle total e zero dependência de pacote legado |
+
+**Implementação escolhida:** `RetrieverPaiFilho`, subclasse de `langchain_core.retrievers.BaseRetriever`. Busca os `k` filhos mais similares via `similarity_search_with_relevance_scores`, filtra por `score_threshold`, e deduplica pais (necessário porque múltiplos filhos — ex.: duas linhas da mesma tabela — podem apontar para o mesmo pai). Persistência dos pais feita via JSON simples (`salvar_pais`/`carregar_pais`), substituindo `LocalFileStore`/`create_kv_docstore` sem introduzir dependência nova.
+
+```python
+class RetrieverPaiFilho(BaseRetriever):
+    vectorstore: object
+    pais: dict
+    k: int = 4
+    score_threshold: float = 0.70
+
+    def _get_relevant_documents(self, query, *, run_manager=None):
+        resultados = self.vectorstore.similarity_search_with_relevance_scores(query, k=self.k)
+
+        pais_encontrados = []
+        ids_ja_adicionados = set()
+
+        for doc_filho, score in resultados:
+            if score < self.score_threshold:
+                continue
+            doc_id = doc_filho.metadata['doc_id']
+            if doc_id in ids_ja_adicionados:
+                continue
+            ids_ja_adicionados.add(doc_id)
+            pais_encontrados.append(self.pais[doc_id])
+
+        return pais_encontrados
+```
+
+### Recalibração do score_threshold
+
+O `score_threshold=0.68`, calibrado originalmente para os chunks maiores do `politicas.txt` (uma seção inteira por chunk), não generalizou para a granularidade menor dos filhos pai-filho. Confirmado por regressão no eval set: a pergunta fora do domínio "copa do mundo fifa" passou a retornar contexto (score 0.6889, acima do threshold antigo), quando na base anterior ficava em 0.63–0.66.
+
+**Diagnóstico.** Um dump completo de scores (`k=28`, toda a base) para essa mesma query mostrou a distribuição inteira comprimida entre 0.598 e 0.689 — uma faixa muito mais estreita do que o esperado para conteúdo sem nenhuma relação com a pergunta. Isso é consistente com anisotropia de embeddings: qualquer par de vetores compartilha um "chão de ruído" na similaridade de cosseno, independente de relação semântica real; com chunks menores, esse ruído de fundo passa a representar uma fração maior do score total, comprimindo a faixa inteira para mais perto do threshold antigo.
+
+**Recalibração empírica.** Rodado o mesmo dump (`k=28`) para 8 perguntas com resposta clara e específica, cobrindo capítulos diferentes da base. Resultado: pior caso do lado "relevante" (filho correto) em 0.7987; melhor caso do lado "ruído" (fora do domínio) em 0.6889 — uma janela real, porém mais estreita que a anterior (~0.11 contra ~0.19 da base antiga, já que o teto do sinal real também caiu, não só o chão do ruído subiu). Escolhido `score_threshold=0.70`: fica com folga de margem tanto acima do chão de ruído medido (evita ficar colado em 0.6889) quanto abaixo do pior caso relevante medido (0.7987).
+
+### Investigação de regressão aparente no eval set (caso "meu pedido foi extraviado")
+
+Após a recalibração, o eval set completo passou a apresentar apenas uma falha inesperada: `grounding_should_fail` para a pergunta "meu pedido foi extraviado" (esperado `False`, obtido `True`).
+
+Hipóteses testadas e descartadas, nessa ordem:
+
+1. **Ambiguidade introduzida pelo Capítulo 6** (a pergunta, sem mencionar região, poderia agora ser interpretada como internacional, já que a regra de extravio internacional contradiz a doméstica). Descartada: `verificar_informacao_suficiente()` chamado isoladamente sobre essa pergunta retornou `False` — o verificador não considera a pergunta ambígua.
+2. **Escalonamento para atendente humano** (o Max poderia, em algumas execuções, decidir transferir em vez de responder, o que o código do eval set trata como equivalente a "grounding falhou"). Descartada: 20 execuções isoladas de geração de resposta produziram texto idêntico, sem o marcador `TRANSFER_HUMANO` em nenhuma delas.
+3. **Instabilidade conhecida do veredito de grounding** (documentada na Seção 8 — o verificador pode divergir entre execuções mesmo sobre o mesmo contexto, por variação de fraseado do `llm_chat`, que roda com `temperature=0.3`). Confirmada por eliminação: reexecutar o eval set completo do zero não reproduziu a falha. Taxa observada: 1 falha em 27 tentativas (~3.7%) somando todas as reproduções manuais e as duas rodadas completas do eval set.
+
+**Conclusão:** não é uma regressão da migração para PDF, nem do retriever novo, nem do threshold recalibrado — é uma instância da instabilidade já conhecida e documentada, agora com uma taxa de ocorrência aproximada medida. Nenhuma mudança de código ou de eval set necessária para esse caso.
+
+### Resultado final da integração
+
+Eval set (26 casos) rodando limpo contra a base em PDF, com `score_threshold=0.70` e o `RetrieverPaiFilho` em produção — encerrando o item "base de conhecimento maior via PDF" do roadmap da Seção 16.
+
+### Próximos passos
+
+- Nenhuma pendência estrutural em aberto para a extração, o retriever ou a calibração de threshold contra a base em PDF.
+- Retomar, nesta ordem, os itens da Seção 16 que dependiam de uma base maior: (1) reavaliar query rewriting/HyDE, agora com base heterogênea o suficiente (múltiplos capítulos, tabela, regras contraditórias entre si) para o teste fazer sentido; (2) few-shot prompting sistemático, usando o eval set expandido; (3) decisão sobre detecção de mensagem fragmentada (opcional).
+- Memória/histórico de conversa continua adiado até o projeto passar a usar banco de dados (Fase 3 do roadmap de estudos), sem mudança nessa decisão nesta etapa.
