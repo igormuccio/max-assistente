@@ -774,6 +774,8 @@ def formatar_linhas_tabela(tabela, titulo_secao):
 
 Cada linha formatada usa o cabeçalho como rótulo por célula (`"Região: Sul. Prazo padrão: 3 a 4 dias úteis. Prazo expresso: 2 dias úteis."`), prefixada com o título da seção de origem (*chunk enrichment*, mesma técnica já usada na Seção 12.4) — garantindo que cada linha seja autossuficiente mesmo isolada do chunk-pai.
 
+**Atualização (integração em produção):** o prefixo de título deixou de ser aplicado dentro de `formatar_linhas_tabela` e foi centralizado na camada de conversão pai-filho (`formatar_texto_filho`), passando a cobrir também o filho de abertura de seção, que até então não tinha esse tratamento — ver "Correção de retrieval: título ausente no filho de abertura de seção", mais abaixo.
+
 **Decisão consciente de manter a numeração do título ("1.1") no prefixo:** identificado como ruído semântico puro para o embedding (o projeto não usa essa numeração como referência ou citação em nenhum outro ponto do pipeline), mas mantido por decisão deliberada de custo-benefício — o ganho de removê-lo (poucos tokens) não justificou o custo de engenharia associado (uma implementação sem dependência nova adicionava complexidade ao código para um problema de impacto mínimo). Avaliada e descartada a opção via `import re`, especificamente pelo princípio já aplicado no restante do projeto de não empilhar imports desnecessários quando o ganho é marginal.
 
 **Reconciliação por posição:** o problema central — `extract_words()` e `extract_tables()` operam de forma cega um ao outro, então usá-los em paralelo sem reconciliação duplicaria o conteúdo da tabela (uma vez bagunçado, dentro do texto corrido; outra vez estruturado). A solução adotada usa `page.find_tables()` (variante de `extract_tables()` que expõe `.bbox`, a caixa delimitadora da tabela) para obter a faixa vertical (`top`/`bottom`) onde a tabela vive na página, e comparar essa faixa contra a posição (`top`) de cada palavra devolvida por `extract_words()`.
@@ -832,6 +834,96 @@ Com isso, as duas pendências da Seção 17 (split fino por run-in e tratamento 
 
 Ao final desta etapa, o pipeline passou a reconstruir automaticamente a hierarquia lógica do documento a partir dos metadados tipográficos — incluindo tratamento dedicado para conteúdo tabular, reconciliado por posição para não duplicar informação — produzindo uma estrutura parent-child completa (chunk-pai por seção H3, filhos por run-in e por linha de tabela), sem depender de convenções de formatação específicas do documento-fonte nem de valores hardcoded.
 
+### Integração em produção
+
+O pipeline validado em `tests/debug_extracao_pdf.py` foi promovido para `src/extracao_pdf.py`, mantendo a lógica de extração e chunking sem alterações de comportamento, e adicionando duas novas responsabilidades: conversão dos chunks pai-filho para `Document`s do LangChain, e a correção de retrieval descrita a seguir.
+
+### Correção de retrieval: título ausente no filho de abertura de seção
+
+O filho de abertura de cada seção (texto antes do primeiro run-in, `run_in: None`) não carregava nenhuma identificação da seção no próprio `page_content` — diferente das linhas de tabela, que já embutiam o título (seção anterior). Isso criava um ponto cego real: perguntas genéricas sobre a mecânica de uma regra (ex.: "os feriados contam como dia útil no prazo?") tendiam a cair nesse filho "solto", sem nenhuma palavra-chave da seção ajudando o embedding a ancorá-lo semanticamente.
+
+A correção centralizou o prefixo de título — antes só aplicado à tabela — para todo filho sem run-in, movendo essa responsabilidade para a camada de conversão (`formatar_texto_filho`), e removendo o prefixo manual de dentro de `formatar_linhas_tabela` para não duplicar.
+
+```python
+def formatar_texto_filho(filho, titulo_secao):
+    texto = ' '.join(filho['texto'])
+    if filho['run_in']:
+        return f"{filho['run_in']}: {texto}"
+    return f"{titulo_secao}. {texto}"
+```
+
+**Efeito colateral aceito e documentado:** o `page_content` do chunk-pai passou a ter o título ligeiramente duplicado (título do chunk + título repetido dentro do primeiro filho concatenado a ele). Irrelevante na prática, já que o pai nunca é embedado — só é devolvido como contexto para o LLM, onde a repetição não tem custo funcional.
+
+### Arquitetura de retrieval: ParentDocumentRetriever descartado em favor de retriever próprio
+
+Testado inicialmente com `langchain_classic.retrievers.ParentDocumentRetriever` + `LocalFileStore`, mas descartado antes de ir para produção:
+
+- `langchain_classic` é um pacote de compatibilidade separado, introduzido na reorganização do LangChain 1.0, com suporte limitado a correções de segurança até dezembro de 2026 — não é uma base recomendada para código novo.
+- A documentação atual do LangChain não cataloga mais `ParentDocumentRetriever` como estratégia de retrieval; trata "Retriever" como uma interface (`BaseRetriever`) a ser implementada por projeto, não uma classe pronta para cada padrão.
+- Confirmado por precedente real: a migração do pacote `langchain-mongodb` para LangChain 1.0 substituiu o uso de `ParentDocumentRetriever` por uma subclasse própria de `BaseRetriever`.
+
+Alternativas mapeadas antes da decisão final:
+
+| Abordagem | Onde é usada | Trade-off |
+|---|---|---|
+| `ParentDocumentRetriever` (langchain_classic) | Legado, ainda funcional | Pacote em manutenção, não desenvolvimento ativo |
+| `AutoMergingRetriever` (LlamaIndex) | Outro framework, ativamente mantido | Exigiria migrar o projeto inteiro de framework por causa de um único componente; comportamento de merge diferente (só promove o pai quando um número mínimo de filhos do mesmo pai aparece nos resultados, não qualquer um) |
+| Contexto do pai embutido no metadata do filho | Técnica sem dependência extra | Duplica o texto do pai N vezes dentro do índice vetorial (irrelevante em 6 páginas; escalaria mal em bases grandes) |
+| **Retriever próprio (`RetrieverPaiFilho`, escolhida)** | `BaseRetriever` do `langchain_core` (núcleo estável) | Mais código para manter, mas controle total e zero dependência de pacote legado |
+
+**Implementação escolhida:** `RetrieverPaiFilho`, subclasse de `langchain_core.retrievers.BaseRetriever`. Busca os `k` filhos mais similares via `similarity_search_with_relevance_scores`, filtra por `score_threshold`, e deduplica pais (necessário porque múltiplos filhos — ex.: duas linhas da mesma tabela — podem apontar para o mesmo pai). Persistência dos pais feita via JSON simples (`salvar_pais`/`carregar_pais`), substituindo `LocalFileStore`/`create_kv_docstore` sem introduzir dependência nova.
+
+```python
+class RetrieverPaiFilho(BaseRetriever):
+    vectorstore: object
+    pais: dict
+    k: int = 4
+    score_threshold: float = 0.70
+
+    def _get_relevant_documents(self, query, *, run_manager=None):
+        resultados = self.vectorstore.similarity_search_with_relevance_scores(query, k=self.k)
+
+        pais_encontrados = []
+        ids_ja_adicionados = set()
+
+        for doc_filho, score in resultados:
+            if score < self.score_threshold:
+                continue
+            doc_id = doc_filho.metadata['doc_id']
+            if doc_id in ids_ja_adicionados:
+                continue
+            ids_ja_adicionados.add(doc_id)
+            pais_encontrados.append(self.pais[doc_id])
+
+        return pais_encontrados
+```
+
+### Recalibração do score_threshold
+
+O `score_threshold=0.68`, calibrado originalmente para os chunks maiores do `politicas.txt` (uma seção inteira por chunk), não generalizou para a granularidade menor dos filhos pai-filho. Confirmado por regressão no eval set: a pergunta fora do domínio "copa do mundo fifa" passou a retornar contexto (score 0.6889, acima do threshold antigo), quando na base anterior ficava em 0.63–0.66.
+
+**Diagnóstico.** Um dump completo de scores (`k=28`, toda a base) para essa mesma query mostrou a distribuição inteira comprimida entre 0.598 e 0.689 — uma faixa muito mais estreita do que o esperado para conteúdo sem nenhuma relação com a pergunta. Isso é consistente com anisotropia de embeddings: qualquer par de vetores compartilha um "chão de ruído" na similaridade de cosseno, independente de relação semântica real; com chunks menores, esse ruído de fundo passa a representar uma fração maior do score total, comprimindo a faixa inteira para mais perto do threshold antigo.
+
+**Recalibração empírica.** Rodado o mesmo dump (`k=28`) para 8 perguntas com resposta clara e específica, cobrindo capítulos diferentes da base. Resultado: pior caso do lado "relevante" (filho correto) em 0.7987; melhor caso do lado "ruído" (fora do domínio) em 0.6889 — uma janela real, porém mais estreita que a anterior (~0.11 contra ~0.19 da base antiga, já que o teto do sinal real também caiu, não só o chão do ruído subiu). Escolhido `score_threshold=0.70`: fica com folga de margem tanto acima do chão de ruído medido (evita ficar colado em 0.6889) quanto abaixo do pior caso relevante medido (0.7987).
+
+### Investigação de regressão aparente no eval set (caso "meu pedido foi extraviado")
+
+Após a recalibração, o eval set completo passou a apresentar apenas uma falha inesperada: `grounding_should_fail` para a pergunta "meu pedido foi extraviado" (esperado `False`, obtido `True`).
+
+Hipóteses testadas e descartadas, nessa ordem:
+
+1. **Ambiguidade introduzida pelo Capítulo 6** (a pergunta, sem mencionar região, poderia agora ser interpretada como internacional, já que a regra de extravio internacional contradiz a doméstica). Descartada: `verificar_informacao_suficiente()` chamado isoladamente sobre essa pergunta retornou `False` — o verificador não considera a pergunta ambígua.
+2. **Escalonamento para atendente humano** (o Max poderia, em algumas execuções, decidir transferir em vez de responder, o que o código do eval set trata como equivalente a "grounding falhou"). Descartada: 20 execuções isoladas de geração de resposta produziram texto idêntico, sem o marcador `TRANSFER_HUMANO` em nenhuma delas.
+3. **Instabilidade conhecida do veredito de grounding** (documentada na Seção 8 — o verificador pode divergir entre execuções mesmo sobre o mesmo contexto, por variação de fraseado do `llm_chat`, que roda com `temperature=0.3`). Confirmada por eliminação: reexecutar o eval set completo do zero não reproduziu a falha. Taxa observada: 1 falha em 27 tentativas (~3.7%) somando todas as reproduções manuais e as duas rodadas completas do eval set.
+
+**Conclusão:** não é uma regressão da migração para PDF, nem do retriever novo, nem do threshold recalibrado — é uma instância da instabilidade já conhecida e documentada, agora com uma taxa de ocorrência aproximada medida. Nenhuma mudança de código ou de eval set necessária para esse caso.
+
+### Resultado final da integração
+
+Eval set (26 casos) rodando limpo contra a base em PDF, com `score_threshold=0.70` e o `RetrieverPaiFilho` em produção — encerrando o item "base de conhecimento maior via PDF" do roadmap da Seção 16.
+
 ### Próximos passos
 
-- Nenhuma pendência estrutural em aberto para a extração do PDF em si. Etapas futuras envolveriam integrar esse pipeline ao `inicializacao.py` de produção (hoje ele existe isolado em `tests/debug_extracao_pdf.py`, como scaffold de validação) e recalibrar `score_threshold`/`chunk_size` contra a base em PDF, retomando a decisão de query rewriting/HyDE já registrada na Seção 16 — agora com uma base de conhecimento maior disponível para esse teste.
+- Nenhuma pendência estrutural em aberto para a extração, o retriever ou a calibração de threshold contra a base em PDF.
+- Retomar, nesta ordem, os itens da Seção 16 que dependiam de uma base maior: (1) reavaliar query rewriting/HyDE, agora com base heterogênea o suficiente (múltiplos capítulos, tabela, regras contraditórias entre si) para o teste fazer sentido; (2) few-shot prompting sistemático, usando o eval set expandido; (3) decisão sobre detecção de mensagem fragmentada (opcional).
+- Memória/histórico de conversa continua adiado até o projeto passar a usar banco de dados (Fase 3 do roadmap de estudos), sem mudança nessa decisão nesta etapa.
