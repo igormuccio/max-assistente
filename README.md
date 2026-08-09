@@ -67,7 +67,7 @@ flowchart TD
 
     subgraph Inicializacao [Inicialização]
         inicializacaopy[inicializacao.py] --> CarregaPrompt[Carrega Prompt do Sistema]
-        inicializacaopy --> CarregaBase[Carrega Base de Conhecimento por Seção]
+        inicializacaopy --> CarregaBase[Carrega Base de Conhecimento em PDF - Retrieval Pai-Filho]
         inicializacaopy --> CarregaIndice[Carrega ou Cria Índice Vetorial]
     end
 
@@ -107,27 +107,28 @@ Antes de qualquer busca, o Max verifica se a mensagem é uma saudação — usan
 
 Em seguida, uma chamada ao LLM verifica se a pergunta já contém as informações necessárias para determinar qual regra se aplica (região, prazo, data da compra). Perguntas que dependem desses dados e ainda não os informaram recebem um pedido de mais detalhes antes de qualquer busca — evitando gastar uma chamada de geração e uma busca vetorial em uma pergunta que já se sabe estar incompleta.
 
-Para perguntas de negócio, o sistema gera embeddings da consulta e realiza uma busca vetorial utilizando FAISS, com um limiar de relevância mínimo (`score_threshold`). A base de conhecimento é dividida por seção — uma política de negócio por chunk, não por contagem de caracteres — evitando que uma regra seja fragmentada entre sua condição e sua consequência.
+Para perguntas de negócio, o sistema gera embeddings da consulta e realiza uma busca vetorial utilizando FAISS, com um limiar de relevância mínimo (`score_threshold`). A base de conhecimento é um PDF de políticas, processado com extração estrutural via metadados de fonte (tamanho e tipografia) — reconstruindo a hierarquia de capítulos e seções do documento sem depender de convenções de formatação. O chunking segue uma estratégia de **retrieval pai-filho**: unidades pequenas (uma subseção ou linha de tabela por vez) são usadas na busca por similaridade, enquanto o conteúdo completo da seção correspondente é devolvido como contexto ao LLM — evitando tanto a diluição semântica de chunks grandes quanto a perda de contexto de chunks pequenos demais.
 
 Se nenhum chunk for relevante o suficiente, o Max pede para o cliente reformular; se isso se repetir, a conversa é transferida para um atendente, sem gastar uma chamada de geração em uma pergunta sem contexto útil.
 
 Quando contexto relevante é encontrado, ele é inserido no prompt enviado ao GPT-4o Mini junto com a pergunta original do cliente, permitindo respostas fundamentadas na base de conhecimento da empresa — não no conhecimento genérico do modelo — e capazes de aplicar a política correta mesmo quando mais de uma política candidata aparece no contexto. Antes de exibir a resposta, uma segunda chamada ao modelo verifica se ela usa apenas informação presente no contexto e no relato do cliente (*grounding verification*); se a resposta contiver uma inferência não fundamentada, ela é descartada e a conversa é transferida para um atendente humano, em vez de mostrada ao cliente.
 
-O índice vetorial é persistido em disco e só é recalculado quando a base de conhecimento (`politicas.txt`) é alterada, evitando reprocessamento desnecessário a cada execução.
+O índice vetorial e os documentos-pai são persistidos em disco e só são recalculados quando a base de conhecimento (`politicas_xyz.pdf`) é alterada, evitando reprocessamento desnecessário a cada execução.
 
-Um eval set automatizado (`tests/`) roda um conjunto de perguntas de teste contra o pipeline completo — saudação, recuperação de contexto, necessidade de informação adicional e grounding — usado para validar que mudanças no prompt ou no chunking não introduzem regressões em comportamentos já calibrados.
+Um eval set automatizado (`tests/`) roda um conjunto de perguntas de teste contra o pipeline completo — saudação, recuperação de contexto, necessidade de informação adicional e grounding — usado para validar que mudanças no prompt, no chunking ou nos parâmetros de retrieval não introduzem regressões em comportamentos já calibrados.
 
 ## Funcionalidades
 
 - Atendimento automatizado sobre problemas de entrega
 - Detecção de saudação via embedding, sem custo de chamada ao modelo
 - Verificação de informação suficiente antes da busca, evitando retrieval desnecessário em perguntas incompletas
-- Respostas baseadas nas políticas da empresa via RAG, com limiar de relevância calibrado
-- Chunking por seção da base de conhecimento, evitando fragmentar uma política de negócio no meio
+- Respostas baseadas nas políticas da empresa via RAG, com limiar de relevância calibrado com dado real
+- Extração estrutural de PDF via metadados de fonte, reconstruindo a hierarquia do documento sem valores hardcoded
+- Chunking e retrieval pai-filho, com tratamento dedicado para conteúdo tabular
 - Verificação de grounding: uma segunda checagem que descarta respostas não fundamentadas no contexto ou no relato do cliente
 - Fallback de reformulação antes de transferir, para perguntas fora do escopo
 - Transferência automática para atendente humano quando necessário
-- Persistência do índice vetorial em disco, recalculado apenas quando a base muda
+- Persistência do índice vetorial e dos documentos-pai em disco, recalculados apenas quando a base muda
 - Eval set automatizado para validar regressões após mudanças de prompt, chunking ou verificação
 - Streaming de respostas em tempo real
 - Histórico de conversa durante a sessão
@@ -140,6 +141,7 @@ Um eval set automatizado (`tests/`) roda um conjunto de perguntas de teste contr
 - OpenAI API (GPT-4o Mini)
 - OpenAI Embeddings
 - FAISS (banco de vetores)
+- pdfplumber (extração estrutural de PDF)
 - python-dotenv
 
 ## Estrutura do projeto
@@ -147,25 +149,28 @@ Um eval set automatizado (`tests/`) roda um conjunto de perguntas de teste contr
 ```
 max-assistente/
 ├── data/
-│   ├── politicas.txt         # Base de conhecimento da empresa
-│   ├── faiss_index/          # Índice vetorial persistido (gerado, ignorado no Git)
-│   └── faiss_metadata.txt    # Controle de atualização do índice (gerado, ignorado no Git)
+│   ├── politicas_xyz.pdf      # Base de conhecimento da empresa
+│   ├── faiss_index/            # Índice vetorial persistido (gerado, ignorado no Git)
+│   ├── faiss_metadata.txt      # Controle de atualização do índice (gerado, ignorado no Git)
+│   └── parent_docstore.json    # Documentos-pai persistidos (gerado, ignorado no Git)
 ├── logs/
-│   └── app.log                # Log técnico separado da interface do usuário (gerado, ignorado no Git)
+│   └── app.log                 # Log técnico separado da interface do usuário (gerado, ignorado no Git)
 ├── prompts/
-│   └── system.txt             # Personalidade e regras do assistente
+│   └── system.txt              # Personalidade e regras do assistente
 ├── src/
-│   ├── main.py                 # Orquestração e loop de conversa
-│   ├── inicializacao.py        # Carregamento de prompt, base de conhecimento por seção e índice de saudação
-│   ├── busca_semantica.py      # Busca de contexto e detecção de saudação por embedding
-│   └── verificacao_llm.py      # Verificação de informação suficiente e de grounding
+│   ├── main.py                  # Orquestração e loop de conversa
+│   ├── inicializacao.py         # Carregamento de prompt, base de conhecimento e retriever pai-filho
+│   ├── extracao_pdf.py          # Extração estrutural do PDF e chunking pai-filho
+│   ├── busca_semantica.py       # Busca de contexto e detecção de saudação por embedding
+│   └── verificacao_llm.py       # Verificação de informação suficiente e de grounding
 ├── tests/
-│   ├── eval_set.json           # Casos de teste do eval set automatizado
-│   └── run_evals.py            # Script de execução do eval set contra o pipeline completo
-├── .env.example                # Exemplo de variáveis de ambiente
+│   ├── eval_set.json             # Casos de teste do eval set automatizado
+│   ├── test_eval_set.py          # Script de execução do eval set contra o pipeline completo
+│   └── debug_*.py                # Scripts de diagnóstico (extração, scores, calibração, estabilidade)
+├── .env.example                 # Exemplo de variáveis de ambiente
 ├── .gitignore
 ├── requirements.txt
-├── EXPERIMENTS.md              # Documentação de testes e decisões técnicas
+├── EXPERIMENTS.md               # Documentação de testes e decisões técnicas
 └── README.md
 ```
 
@@ -202,13 +207,14 @@ python src/main.py
 
 6. (Opcional) Rode o eval set
 ```bash
-python tests/run_evals.py
+python tests/test_eval_set.py
 ```
 
 ## O que este projeto explora
 
 - Prompt engineering para controle de comportamento, incluindo marcadores de controle, mitigação de regras concorrentes e coordenação entre o prompt de geração e os prompts de verificação
 - Pipeline RAG completo: chunking calibrado por seção, embeddings, busca vetorial com FAISS, limiar de relevância
+- Extração estrutural de documentos não estruturados (PDF), via metadados de fonte, e retrieval pai-filho como estratégia de chunking em duas granularidades
 - Ambiguidade semântica entre políticas de negócio próximas, e técnicas de chunk enrichment para separá-las
 - Detecção de alucinação e verificação de grounding como camada de segurança
 - Trade-offs de custo vs. confiabilidade na escolha de modelo e arquitetura
@@ -222,7 +228,7 @@ Cada uma dessas decisões foi testada empiricamente, não apenas assumida — in
 
 - Ampliar o eval set com mais variações de pergunta e um check dedicado a validar qual política de negócio foi aplicada na resposta final
 - Few-shot prompting sistemático nos prompts de geração e verificação, informado pelo eval set expandido
-- Query rewriting ou HyDE para conversas multi-turno, a avaliar com uma base de conhecimento maior
+- Query rewriting ou HyDE para conversas multi-turno
 - Interface Web com Streamlit
 - API REST utilizando FastAPI
 - Banco vetorial dedicado (Chroma ou Pinecone)
@@ -230,4 +236,4 @@ Cada uma dessas decisões foi testada empiricamente, não apenas assumida — in
 
 ## Observações
 
-As políticas presentes em `data/politicas.txt` são fictícias e utilizadas apenas para fins de demonstração.
+As políticas presentes em `data/politicas_xyz.pdf` são fictícias e utilizadas apenas para fins de demonstração.
