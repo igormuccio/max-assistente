@@ -1,5 +1,11 @@
-def verificar_informacao_suficiente(llm, pergunta):
-    prompt = f"""Analise a pergunta do cliente abaixo.
+from inicializacao import criar_llm
+from verificacao_llm import verificar_informacao_suficiente
+
+llm = criar_llm()
+
+pergunta = "qual o prazo de entrega para o sul?"
+
+prompt = f"""Analise a pergunta do cliente abaixo.
 
 Pergunta: {pergunta}
 
@@ -37,38 +43,11 @@ Formato obrigatório:
 Raciocínio: <sua explicação>
 Veredito: SIM ou NÃO"""
 
-    verificacao = llm.invoke(prompt)
+resposta = llm.invoke(prompt)
 
-    linhas = verificacao.content.strip().split('\n')
-    veredito = linhas[-1] if linhas else verificacao.content
-    return 'SIM' in veredito.upper()
+print("===== RESPOSTA COMPLETA DO MODELO =====")
+print(resposta.content)
+print("=========================================")
 
-def verificar_grounding(llm, pergunta, contexto, resposta):
-    prompt_verificacao = f"""Você é um verificador de fatos. Analise se a resposta abaixo é sustentada pelo contexto fornecido.
-
-Pergunta do cliente:
-{pergunta}
-
-Contexto:
-{contexto}
-
-Resposta a verificar:
-{resposta}
-
-A resposta pode aplicar uma política do contexto com base na condição de aplicabilidade dela, desde que essa condição corresponda a algo que o cliente afirmou na pergunta. Isso NÃO é considerado inferência indevida.
-
-O que NÃO é permitido: a resposta inventar dados sobre o pedido (região, prazo, datas, status) que não foram mencionados nem pelo cliente nem pelo contexto, ou combinar políticas de forma que nenhuma delas sustente isoladamente a afirmação.
-
-Primeiro, explique em uma frase seu raciocínio: identifique qual trecho do contexto sustenta (ou não sustenta) cada afirmação da resposta.
-
-Depois, na última linha, responda apenas com SIM (se houver algo não sustentado) ou NÃO (se tudo estiver sustentado).
-
-Formato obrigatório:
-Raciocínio: <sua explicação>
-Veredito: SIM ou NÃO"""
-
-    verificacao = llm.invoke(prompt_verificacao)
-
-    linhas = verificacao.content.strip().split('\n')
-    veredito = linhas[-1] if linhas else verificacao.content
-    return 'SIM' in veredito.upper()
+resultado = verificar_informacao_suficiente(llm, pergunta)
+print(f"\nResultado da função (parseado): {resultado}")
