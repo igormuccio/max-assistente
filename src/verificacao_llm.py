@@ -40,6 +40,28 @@ Veredito: SIM ou NÃO"""
     veredito = linhas[-1] if linhas else verificacao.content
     return 'SIM' in veredito.upper()
 
+def reescrever_query(llm, pergunta):
+    prompt = f"""Reescreva a pergunta do cliente abaixo em um formato mais direto e formal, adequado para busca em uma base de políticas escrita em linguagem técnica.
+
+Pergunta original: {pergunta}
+
+Regras obrigatórias:
+- Preserve todo o conteúdo factual da pergunta original: se algo não foi dito, não invente.
+- NÃO adicione números, prazos, regiões, datas ou qualquer dado concreto que o cliente não tenha mencionado explicitamente.
+- Se a pergunta usa uma expressão vaga de tempo ou quantidade (ex: "só um pouco", "já faz muito tempo", "alguns dias"), mantenha essa vaguidão na reescrita — não a substitua por um valor específico.
+- Remova hesitações, repetições e linguagem coloquial, mantendo o sentido original intacto.
+- A reescrita deve continuar sendo uma pergunta ou descrição de situação, no mesmo formato da original — não transforme em afirmação nem em resposta.
+
+Exemplos:
+"meu pedido ta atrasado" → "meu pedido está atrasado"
+"meu pedido está atrasado só um pouco, ainda não chegou mas também não sumiu, o que eu faço?" → "meu pedido está com um pequeno atraso, ainda não chegou, o que fazer?"
+"já faz muito tempo que meu pedido não chega, posso cancelar?" → "meu pedido está atrasado há muito tempo, é possível cancelar?"
+
+Responda apenas com a pergunta reescrita, sem explicações adicionais."""
+
+    resposta = llm.invoke(prompt)
+    return resposta.content.strip()
+
 def verificar_grounding(llm, pergunta, contexto, resposta):
     prompt_verificacao = f"""Você é um verificador de fatos. Analise se a resposta abaixo é sustentada pelo contexto fornecido.
 
