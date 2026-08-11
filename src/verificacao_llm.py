@@ -7,10 +7,7 @@ Considere SIM apenas se a pergunta descreve uma situação cuja resposta correta
 
 A empresa atende pedidos nacionais e, em caráter piloto, pedidos internacionais para dois países: Portugal e Estados Unidos. O dado que falta depende do assunto da pergunta:
 
-- PRAZO DE ENTREGA: se o pedido é internacional, o prazo muda entre Portugal (10 a 15 dias úteis) e Estados Unidos (8 a 12 dias úteis) — nesse caso, saber apenas "internacional" NÃO é suficiente, é necessário saber qual dos dois países.
-- EXTRAVIO: a regra muda apenas entre nacional e internacional — o procedimento é o mesmo para Portugal e Estados Unidos. Nesse caso, saber "internacional" (sem precisar do país específico) já é suficiente.
-- Se o cliente menciona um país que não é Portugal nem Estados Unidos, isso não é falta de informação — é um destino que a empresa não cobre, o que é um tipo de limitação diferente e não deve ser tratado por este verificador.
-- Outros assuntos (reembolso já aprovado, taxas alfandegárias, horário de atendimento, canais de atendimento) não dependem de região, país ou prazo — o dado nacional/internacional é irrelevante para eles.
+- PRAZO DE ENTREGA: se o pedido é internacional, o prazo muda entre Portugal (10 a 15 dias úteis) e Estados Unidos (8 a 12 dias úteis) — nesse caso, saber apenas "internacional" NÃO é suficiente, é necessário saber qual dos dois países. Porém, se o cliente já menciona uma região doméstica (Sul, Sudeste, Nordeste, Norte, Centro-Oeste), isso já resolve a questão: assuma que o pedido é nacional, e não é necessário perguntar se é nacional ou internacional.
 
 Considere NÃO se:
 - A pergunta já contém o dado necessário para o assunto específico perguntado (ex: região doméstica já basta para prazo nacional; "internacional" já basta para extravio; o país específico já foi informado, quando o assunto exige).

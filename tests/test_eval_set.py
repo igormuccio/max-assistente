@@ -68,6 +68,30 @@ def avaliar_contem_texto_proibido(pergunta, retriever, llm_chat, system_prompt, 
     return texto_proibido.upper() in reply.upper()
 
 
+def avaliar_resposta_contem(pergunta, retriever, llm_chat, system_prompt, texto_esperado, **kwargs):
+    contexto = buscar_contexto(retriever, pergunta)
+    if not contexto.strip():
+        return None
+
+    reply = gerar_resposta_max(llm_chat, system_prompt, contexto, pergunta)
+
+    return texto_esperado.upper() in reply.upper()
+
+
+def avaliar_intercepta_em(pergunta, vectorstore_saudacoes, llm_verificador, retriever, **kwargs):
+    if eh_saudacao(vectorstore_saudacoes, pergunta):
+        return 'saudacao'
+
+    if verificar_informacao_suficiente(llm_verificador, pergunta):
+        return 'needs_more_information'
+
+    contexto = buscar_contexto(retriever, pergunta)
+    if not contexto.strip():
+        return 'sem_contexto'
+
+    return 'passou'
+
+
 # Mapa: nome do campo em "checks" -> função que sabe avaliá-lo.
 # O nome do campo já diz o que está sendo verificado, sem precisar de um
 # campo "tipo_verificacao" separado duplicando essa informação.
@@ -77,6 +101,8 @@ AVALIADORES = {
     'needs_more_information': avaliar_needs_more_information,
     'grounding_should_fail': avaliar_grounding_should_fail,
     'contem_texto_proibido': avaliar_contem_texto_proibido,
+    'resposta_contem': avaliar_resposta_contem,
+    'intercepta_em': avaliar_intercepta_em,
 }
 
 
@@ -98,6 +124,8 @@ def rodar_caso(caso, **contexto_execucao):
     argumentos_extras = {}
     if 'texto_proibido' in caso:
         argumentos_extras['texto_proibido'] = caso['texto_proibido']
+    if 'texto_esperado' in caso:
+        argumentos_extras['texto_esperado'] = caso['texto_esperado']
 
     resultado_real = avaliador(pergunta, **contexto_execucao, **argumentos_extras)
 

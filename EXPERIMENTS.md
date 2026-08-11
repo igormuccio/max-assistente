@@ -26,6 +26,7 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 # Parte 2 — Experimento de escala: migração para base em PDF
 
 - [17. Migração da base de conhecimento para PDF: extração estrutural via metadados de fonte](#17-migração-da-base-de-conhecimento-para-pdf-extração-estrutural-via-metadados-de-fonte)
+- [18. Ambiguidade nacional/internacional: escopo de `needs_more_information` vs. query rewriting/HyDE](#18-ambiguidade-nacionalinternacional-escopo-de-needs_more_information-vs-query-rewritinghyde)
 
 ## 1. Por que RAG neste projeto
 
@@ -927,3 +928,70 @@ Eval set (26 casos) rodando limpo contra a base em PDF, com `score_threshold=0.7
 - Nenhuma pendência estrutural em aberto para a extração, o retriever ou a calibração de threshold contra a base em PDF.
 - Retomar, nesta ordem, os itens da Seção 16 que dependiam de uma base maior: (1) reavaliar query rewriting/HyDE, agora com base heterogênea o suficiente (múltiplos capítulos, tabela, regras contraditórias entre si) para o teste fazer sentido; (2) few-shot prompting sistemático, usando o eval set expandido; (3) decisão sobre detecção de mensagem fragmentada (opcional).
 - Memória/histórico de conversa continua adiado até o projeto passar a usar banco de dados (Fase 3 do roadmap de estudos), sem mudança nessa decisão nesta etapa.
+- O item (1) acima passou por um desvio de escopo antes de chegar à implementação de fato — ver Seção 18.
+
+---
+
+# Parte 3 — Reavaliação de query rewriting/HyDE contra a base em PDF
+
+## 18. Ambiguidade nacional/internacional: escopo de `needs_more_information` vs. query rewriting/HyDE
+
+Ao abrir a branch `experimento-query-rewriting-hyde` para reavaliar as duas técnicas (item planejado desde a Seção 16), a primeira pergunta prática — "quais casos do eval set cada técnica deveria atacar?" — expôs um problema mais fundamental antes mesmo de qualquer código de rewriting/HyDE ser escrito.
+
+### O problema: duas regras contraditórias sobre extravio, sem forma de saber qual aplicar
+
+O Capítulo 6 (Envios Internacionais, piloto — Portugal e Estados Unidos) contradiz o Capítulo 2 na regra de extravio: no fluxo doméstico, o relato direto do cliente já é suficiente para acionar reenvio; no fluxo internacional, é necessário aguardar confirmação formal da transportadora parceira, com prazo de até 15 dias úteis. A pergunta `"meu pedido foi extraviado"`, sem menção de região ou país, não contém informação suficiente para saber qual das duas regras se aplica.
+
+**Por que isso não é um problema que query rewriting ou HyDE deveriam resolver.** As duas técnicas, diante de uma pergunta subespecificada, só têm um caminho possível: gerar uma versão mais específica da pergunta (rewriting) ou um documento hipotético que a responda (HyDE) — e nenhuma das duas consegue gerar texto genuinamente ambíguo. Ou seja, a técnica não resolveria a ambiguidade, apenas a esconderia atrás de uma adivinhação implícita do LLM, tornando o erro mais difícil de rastrear do que já é hoje.
+
+**Decisão:** tratar a ambiguidade nacional/internacional como um caso de `needs_more_information` (o mesmo mecanismo já usado para "meu pedido está atrasado há 1 semana" — Seção 13.4), não como um problema de retrieval. Isso desloca o problema para a camada correta do pipeline: em vez de tentar melhorar a busca para um caso em que a busca não tem informação suficiente para decidir, a pergunta ambígua é interceptada antes de chegar ao retriever, e o cliente é solicitado a especificar o dado que falta.
+
+Essa decisão reduz o escopo do experimento de rewriting/HyDE: o grupo de casos ligados à ambiguidade de capítulo sai do escopo dessas duas técnicas inteiramente. O experimento de rewriting/HyDE (Seção 19, a ser escrita) passa a focar apenas em casos de descasamento de registro (linguagem casual/verbosa do cliente vs. texto formal do PDF), que é o tipo de problema que as duas técnicas de fato endereçam.
+
+### Extensão do verificador: o dado que falta depende do assunto da pergunta
+
+A primeira tentativa de correção tratou "nacional/internacional" como uma extensão direta do eixo já existente de "região" em `verificar_informacao_suficiente()` — mas uma leitura mais cuidadosa do Capítulo 6 mostrou que a granularidade necessária **depende do assunto da pergunta, não é uniforme**:
+
+- **Prazo de entrega:** muda entre Portugal (10–15 dias úteis) e Estados Unidos (8–12 dias úteis) — saber apenas "internacional" não é suficiente, é necessário o país específico.
+- **Extravio:** a regra muda apenas entre nacional e internacional — o procedimento é o mesmo para os dois países cobertos. Saber "internacional", sem o país, já é suficiente.
+- **Taxas alfandegárias e outros assuntos não geográficos:** não dependem de região, país ou prazo — o dado nacional/internacional é irrelevante.
+
+Uma primeira versão do prompt, ao tratar erroneamente "meu pedido internacional foi extraviado" como insuficiente (pedindo o país mesmo sem necessidade), foi corrigida após confronto direto com o texto do PDF — reforçando que decisões desse tipo devem ser verificadas contra a fonte, não apenas contra a intuição sobre como a ambiguidade "deveria" funcionar.
+
+O prompt final de `verificar_informacao_suficiente()` (`src/verificacao_llm.py`) resolve o dado que falta por tópico da pergunta, com exemplos contrastantes explícitos (mesma frase-base, "internacional" vs. país específico vs. país não coberto) para fixar a distinção — incluindo o caso de um país fora da cobertura (ex.: França), tratado como limitação de escopo (falta de política), não como falta de dado, e portanto fora da responsabilidade deste verificador.
+
+### Regressão descoberta durante a validação: região doméstica não encerrava a ambiguidade
+
+Rodar o eval set contra a versão corrigida revelou uma segunda falha, não prevista: `"qual o prazo de entrega para o sul?"` — um caso que já passava antes da mudança — passou a retornar `needs_more_information: True` incorretamente.
+
+**Diagnóstico.** O prompt, na primeira correção, só especificava o que contava como suficiente *quando o pedido é internacional* ("é necessário saber qual dos dois países"); nunca afirmava explicitamente que mencionar uma região doméstica (Sul, Sudeste, etc.) resolve a pergunta "nacional ou internacional?" por si só. O modelo tinha que inferir essa regra apenas a partir de um exemplo isolado no prompt, e não generalizou de forma confiável — o restante do bloco de instrução falava quase inteiramente de internacional, então o exemplo isolado não teve peso suficiente.
+
+**Correção.** Adicionada uma frase explícita à regra de PRAZO DE ENTREGA: se o cliente já menciona uma região doméstica, assume-se pedido nacional, sem necessidade de perguntar se é nacional ou internacional. Regra determinística confirmada com o usuário antes da implementação: uma região brasileira mencionada explicitamente (ex. "sul") nunca é ambígua com um destino internacional, porque um cliente com pedido internacional não formularia a pergunta dessa forma.
+
+**Armadilha de processo durante a correção:** a frase de correção foi validada primeiro isoladamente, via um script de debug (`tests/debug_informacao_suficiente.py`, criado nesta etapa para inspecionar o `Raciocínio` bruto do verificador, não só o veredito parseado) — mas a edição nunca foi de fato salva no arquivo de produção (`src/verificacao_llm.py`). O eval set continuou falhando no mesmo caso após um commit que, na aparência, já deveria conter a correção. Identificado ao comparar o conteúdo real do arquivo em produção contra o texto validado no debug script — nenhum dos dois estava desatualizado por engano de lógica, a divergência era puramente entre "testado" e "salvo". Reforça a mesma lição já registrada em outras seções deste documento (Seção 13.3): validar uma mudança isoladamente não garante que ela chegou ao caminho de execução real; `git diff` do arquivo de produção é uma etapa necessária antes de re-rodar qualquer suíte de teste, não apenas depois de uma falha inesperada.
+
+### Instabilidade descartada como causa: diferença de LLM entre chamadas, não do modelo em si
+
+Durante a mesma investigação, duas invocações manuais sucessivas da mesma pergunta (`"qual o prazo de entrega para o sul?"`) produziram vereditos divergentes — o que, à primeira vista, sugeria mais uma instância da instabilidade de veredito já documentada (Seção 8 addendum, agora também observada em `verificar_grounding`). Investigação descartou essa hipótese: as duas chamadas usavam LLMs diferentes (`llm_chat`, `temperature=0.3`, copiado por engano do padrão de outro script de debug; vs. `llm_verificador`, `temperature=0`, o que produção de fato usa). Confirmado, nos call sites reais de `main.py`, que tanto `verificar_informacao_suficiente()` quanto `verificar_grounding()` são chamados com `llm_verificador`. Refeito o teste com o LLM correto (`temperature=0`), o resultado ficou consistente entre execuções — não há evidência de instabilidade nova neste verificador.
+
+### Fechando a lacuna de cobertura exposta pela mudança: dois tipos de check novos no eval set
+
+A mudança em `needs_more_information` expôs uma lacuna já latente no eval set (item "eval set mais robusto", Seção 16): os quatro tipos de check existentes (Seção 13) testam cada etapa do pipeline isoladamente, nunca a sequência real de decisão do `main.py` (`eh_saudacao` → `verificar_informacao_suficiente` → `buscar_contexto` → geração → `verificar_grounding`). Isso significa que os 4 casos existentes construídos em torno de "meu pedido foi extraviado" (nos checks `should_find_context`, `grounding_should_fail`, `needs_more_information` e `contem_texto_proibido`) continuam válidos como testes de função isolada, mas nenhum deles confirma que, no fluxo real de produção, essa pergunta de fato para em `needs_more_information` antes de chegar ao retriever.
+
+Duas lacunas foram fechadas juntas nesta etapa, por serem parte do mesmo item já pendente na Seção 16 (não uma expansão de escopo nova):
+
+**`intercepta_em` — teste de interceptação de pipeline.** Nova função `avaliar_intercepta_em()`, que replica a sequência real de decisão do `main.py` (não uma versão reinventada dela) e retorna em qual etapa o fluxo parou (`'saudacao'`, `'needs_more_information'`, `'sem_contexto'` ou `'passou'`), em vez de um booleano isolado. Caso adicionado: `"meu pedido foi extraviado, o que eu faço?"` deve interceptar em `needs_more_information`.
+
+**`resposta_contem` — validação da política aplicada.** Fecha o gap já identificado na Seção 13.7 (nenhum dos checks existentes valida qual política de negócio foi de fato aplicada na resposta final — uma resposta com a política errada ainda pode estar "fundamentada" e "com contexto encontrado"). Nova função `avaliar_resposta_contem()`, espelhando `avaliar_contem_texto_proibido()` com a lógica invertida (asserção de presença, não de ausência). Caso adicionado: `"qual o prazo do meu pedido para os Estados Unidos?"` deve conter `"8"` na resposta (o prazo de 8–12 dias úteis específico dos EUA, que não aparece em nenhuma outra regra de prazo da base — funcionando como assinatura de que a política correta foi aplicada, e não a doméstica ou a de Portugal).
+
+O terceiro item da Seção 16 relacionado ("ampliar o número de perguntas cobertas") foi deliberadamente deixado de fora desta etapa — decisão de deixá-lo crescer organicamente conforme novos casos surgirem durante os próprios testes de rewriting/HyDE, em vez de um exercício em lote descolado de casos reais.
+
+### Resultado final
+
+Eval set expandido para 28 casos, rodando limpo: 26 passaram, 2 falhas esperadas (limitações já documentadas — reconhecimento de saudação em inglês, Seção 11; caso de reembolso verboso, Seção 8), 0 falhas inesperadas — incluindo os dois casos novos, que passaram já na primeira execução após a implementação.
+
+### Próximos passos
+
+- Escopo de rewriting/HyDE (Seção 19, a ser escrita) confirmado como restrito a casos de descasamento de registro — a ambiguidade de capítulo já está coberta por `needs_more_information`.
+- Item "eval set mais robusto" da Seção 16 parcialmente fechado: pendências (a) interceptação de pipeline e (b) validação de política aplicada, resolvidas; pendência (c) ampliação do volume de perguntas, deixada para crescimento orgânico.
+- Seguir para a implementação de fato de query rewriting e HyDE contra os casos de descasamento de registro mapeados no eval set.
