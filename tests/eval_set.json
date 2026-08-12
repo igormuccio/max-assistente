@@ -116,19 +116,29 @@
   },
   {
     "pergunta": "meu pedido foi extraviado, o que eu faço?",
-    "checks": { "needs_more_information": false },
+    "checks": { "needs_more_information": true },
     "limitacao_conhecida": false
   },
   {
-  "pergunta": "meu pedido chegou amassado, posso trocar por outro produto de valor maior pagando a diferença?",
-  "checks": { "needs_more_information": false },
-  "limitacao_conhecida": true
+    "pergunta": "meu pedido chegou amassado, posso trocar por outro produto de valor maior pagando a diferença?",
+    "checks": { "needs_more_information": false },
+    "limitacao_conhecida": true
   },
   {
-  "pergunta": "meu pedido foi extraviado, o que eu faço?",
-  "texto_proibido": "48",
-  "checks": { "contem_texto_proibido": false },
-  "limitacao_conhecida": false
+    "pergunta": "meu pedido foi extraviado, o que eu faço?",
+    "texto_proibido": "48",
+    "checks": { "contem_texto_proibido": false },
+    "limitacao_conhecida": false
+  },
+  {
+    "pergunta": "meu pedido foi extraviado, o que eu faço?",
+    "checks": { "intercepta_em": "needs_more_information" },
+    "limitacao_conhecida": false
+  },
+  {
+    "pergunta": "qual o prazo do meu pedido para os Estados Unidos?",
+    "texto_esperado": "8",
+    "checks": { "resposta_contem": true },
+    "limitacao_conhecida": false
   }
-
 ]
