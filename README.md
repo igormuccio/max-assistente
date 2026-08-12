@@ -105,7 +105,7 @@ flowchart TD
 
 Antes de qualquer busca, o Max verifica se a mensagem é uma saudação — usando o mesmo mecanismo de embedding do RAG, mas contra uma base pequena de exemplos, sem gastar chamada ao modelo de linguagem para isso.
 
-Em seguida, uma chamada ao LLM verifica se a pergunta já contém as informações necessárias para determinar qual regra se aplica (região, prazo, data da compra). Perguntas que dependem desses dados e ainda não os informaram recebem um pedido de mais detalhes antes de qualquer busca — evitando gastar uma chamada de geração e uma busca vetorial em uma pergunta que já se sabe estar incompleta.
+Em seguida, uma chamada ao LLM verifica se a pergunta já contém as informações necessárias para determinar qual regra se aplica. O dado que falta depende do assunto perguntado, não é uma regra única: para prazo de entrega, a empresa distingue entre pedido nacional e dois destinos internacionais em fase piloto (Portugal e Estados Unidos), cada um com prazo próprio; para extravio, a regra muda apenas entre nacional e internacional, o procedimento é o mesmo para os dois países cobertos. Perguntas que dependem de um dado ainda não informado — região, país de destino ou prazo — recebem um pedido de mais detalhes antes de qualquer busca, evitando gastar uma chamada de geração e uma busca vetorial em uma pergunta que já se sabe estar incompleta.
 
 Para perguntas de negócio, o sistema gera embeddings da consulta e realiza uma busca vetorial utilizando FAISS, com um limiar de relevância mínimo (`score_threshold`). A base de conhecimento é um PDF de políticas, processado com extração estrutural via metadados de fonte (tamanho e tipografia) — reconstruindo a hierarquia de capítulos e seções do documento sem depender de convenções de formatação. O chunking segue uma estratégia de **retrieval pai-filho**: unidades pequenas (uma subseção ou linha de tabela por vez) são usadas na busca por similaridade, enquanto o conteúdo completo da seção correspondente é devolvido como contexto ao LLM — evitando tanto a diluição semântica de chunks grandes quanto a perda de contexto de chunks pequenos demais.
 
@@ -115,13 +115,13 @@ Quando contexto relevante é encontrado, ele é inserido no prompt enviado ao GP
 
 O índice vetorial e os documentos-pai são persistidos em disco e só são recalculados quando a base de conhecimento (`politicas_xyz.pdf`) é alterada, evitando reprocessamento desnecessário a cada execução.
 
-Um eval set automatizado (`tests/`) roda um conjunto de perguntas de teste contra o pipeline completo — saudação, recuperação de contexto, necessidade de informação adicional e grounding — usado para validar que mudanças no prompt, no chunking ou nos parâmetros de retrieval não introduzem regressões em comportamentos já calibrados.
+Um eval set automatizado (`tests/`), com 28 casos, roda um conjunto de perguntas de teste contra o pipeline completo — saudação, recuperação de contexto, necessidade de informação adicional e grounding — usado para validar que mudanças no prompt, no chunking ou nos parâmetros de retrieval não introduzem regressões em comportamentos já calibrados. Além de testar cada etapa isoladamente, dois tipos de check validam propriedades do fluxo real de decisão: um confirma em qual etapa exata do pipeline uma pergunta é interceptada (garantindo, por exemplo, que uma pergunta ambígua entre nacional e internacional é barrada antes de chegar ao retriever, e não só que a função isolada retorna o valor certo); outro confirma qual política de negócio foi de fato aplicada na resposta final, não apenas que a resposta está "fundamentada" em algum contexto — uma resposta pode citar a política errada entre duas candidatas e ainda passar numa checagem de grounding ingênua.
 
 ## Funcionalidades
 
 - Atendimento automatizado sobre problemas de entrega
 - Detecção de saudação via embedding, sem custo de chamada ao modelo
-- Verificação de informação suficiente antes da busca, evitando retrieval desnecessário em perguntas incompletas
+- Verificação de informação suficiente antes da busca, evitando retrieval desnecessário em perguntas incompletas — com granularidade por assunto (prazo internacional exige o país específico; extravio internacional exige apenas saber que é internacional, já que a regra é igual para os destinos cobertos)
 - Respostas baseadas nas políticas da empresa via RAG, com limiar de relevância calibrado com dado real
 - Extração estrutural de PDF via metadados de fonte, reconstruindo a hierarquia do documento sem valores hardcoded
 - Chunking e retrieval pai-filho, com tratamento dedicado para conteúdo tabular
@@ -129,7 +129,7 @@ Um eval set automatizado (`tests/`) roda um conjunto de perguntas de teste contr
 - Fallback de reformulação antes de transferir, para perguntas fora do escopo
 - Transferência automática para atendente humano quando necessário
 - Persistência do índice vetorial e dos documentos-pai em disco, recalculados apenas quando a base muda
-- Eval set automatizado para validar regressões após mudanças de prompt, chunking ou verificação
+- Eval set automatizado (28 casos) para validar regressões após mudanças de prompt, chunking ou verificação — incluindo checagem da ordem real de interceptação do pipeline e da política de negócio de fato aplicada na resposta
 - Streaming de respostas em tempo real
 - Histórico de conversa durante a sessão
 - Log técnico separado da interface do usuário
@@ -219,20 +219,23 @@ python tests/test_eval_set.py
 - Detecção de alucinação e verificação de grounding como camada de segurança
 - Trade-offs de custo vs. confiabilidade na escolha de modelo e arquitetura
 - Persistência de índice vetorial e separação de logs técnicos
-- Eval set automatizado para prevenir regressões entre camadas de retrieval, prompt e verificação
+- Eval set automatizado para prevenir regressões entre camadas de retrieval, prompt e verificação, incluindo checagem da ordem real de execução do pipeline e da política de negócio de fato aplicada, não apenas de cada função isolada
+- Decisões de escopo fundamentadas em evidência empírica — incluindo o descarte, com teste real e não apenas leitura teórica, de técnicas (query rewriting, HyDE) que pareciam fazer sentido na teoria mas não encontraram cenário de aplicação real na arquitetura atual do sistema
 - Organização de projeto em módulos por responsabilidade
 
 Cada uma dessas decisões foi testada empiricamente, não apenas assumida — incluindo casos em que a primeira solução falhou e precisou ser recalibrada. Para o histórico completo de testes, hipóteses e limitações conhecidas, veja [EXPERIMENTS.md](./EXPERIMENTS.md).
 
 ## Melhorias futuras
 
-- Ampliar o eval set com mais variações de pergunta e um check dedicado a validar qual política de negócio foi aplicada na resposta final
-- Few-shot prompting sistemático nos prompts de geração e verificação, informado pelo eval set expandido
-- Query rewriting ou HyDE para conversas multi-turno
+- Ampliar o eval set com mais variações de pergunta (específica, difusa, fora do domínio) — crescimento orgânico conforme novos casos surgirem em teste, não um lote isolado
+- Few-shot prompting sistemático nos prompts de geração e verificação, escolhendo exemplos representativos a partir do eval set completo
+- Detecção de mensagens fragmentadas ou incompletas (cliente digitando em várias mensagens curtas em sequência) — adiada por ora; não builda em cima de nenhuma outra etapa do pipeline, então fica reservada para quando o projeto migrar de configuração de estudo para uma configuração voltada a apresentação
+- Banco de dados (SQL/PostgreSQL, possivelmente um vetorial dedicado) para persistência e memória de conversa entre sessões
 - Interface Web com Streamlit
 - API REST utilizando FastAPI
-- Banco vetorial dedicado (Chroma ou Pinecone)
 - Docker para facilitar o deploy
+
+> Query rewriting e HyDE foram avaliados e **descartados** como funcionalidades de produção, não permanecem como melhoria futura — o código do experimento (`reescrever_query()`, script de debug) fica preservado em uma branch separada como evidência reproduzível, sem integração no fluxo principal. Motivo e processo de teste completos nas Seções 18 e 19 do [EXPERIMENTS.md](./EXPERIMENTS.md).
 
 ## Observações
 
