@@ -66,8 +66,8 @@
   },
   {
     "pergunta": "quero sair",
-    "checks": { "should_find_context": false },
-    "limitacao_conhecida": true
+    "checks": { "intercepta_em": "saida" },
+    "limitacao_conhecida": false
   },
   {
     "pergunta": "qual o prazo de entrega para o sul?",

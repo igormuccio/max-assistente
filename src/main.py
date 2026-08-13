@@ -11,8 +11,8 @@ logging.basicConfig(
 )
 logging.captureWarnings(True)
 
-from inicializacao import carregar_prompt, carregar_base_conhecimento, carregar_indice_saudacoes
-from busca_semantica import buscar_contexto, eh_saudacao
+from inicializacao import carregar_prompt, carregar_base_conhecimento, carregar_indice_saudacoes, carregar_indice_saida
+from busca_semantica import buscar_contexto, eh_saudacao, eh_intencao_saida
 from verificacao_llm import verificar_grounding, verificar_informacao_suficiente
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -25,6 +25,7 @@ def main():
     system_prompt = carregar_prompt()
     retriever = carregar_base_conhecimento()
     vectorstore_saudacoes = carregar_indice_saudacoes()
+    vectorstore_saida = carregar_indice_saida()
 
     llm_chat = ChatOpenAI(
         model='gpt-4o-mini',
@@ -44,7 +45,7 @@ def main():
 
     while True:
         pergunta = input('Você: ')
-        if pergunta.lower() == 'sair':
+        if eh_intencao_saida(vectorstore_saida, pergunta):
             print('Max: Até mais!')
             break
 

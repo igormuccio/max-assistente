@@ -97,3 +97,9 @@ def carregar_indice_saudacoes():
     documentos_saudacao = [Document(page_content=texto) for texto in exemplos_saudacao]
     embeddings = OpenAIEmbeddings()
     return FAISS.from_documents(documentos_saudacao, embeddings)
+
+def carregar_indice_saida():
+    exemplos_saida = ['sair', 'quero sair', 'quero encerrar', 'encerrar conversa', 'tchau', 'até mais', 'pode encerrar', 'finalizar atendimento']
+    documentos_saida = [Document(page_content=texto) for texto in exemplos_saida]
+    embeddings = OpenAIEmbeddings()
+    return FAISS.from_documents(documentos_saida, embeddings)
