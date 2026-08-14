@@ -28,6 +28,7 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [17. Migração da base de conhecimento para PDF: extração estrutural via metadados de fonte](#17-migração-da-base-de-conhecimento-para-pdf-extração-estrutural-via-metadados-de-fonte)
 - [18. Ambiguidade nacional/internacional: escopo de `needs_more_information` vs. query rewriting/HyDE](#18-ambiguidade-nacionalinternacional-escopo-de-needs_more_information-vs-query-rewritinghyde)
 - [19. Query rewriting e HyDE: resultado negativo — nenhuma técnica encontrou cenário real de uso](#19-query-rewriting-e-hyde-resultado-negativo--nenhuma-técnica-encontrou-cenário-real-de-uso)
+- [20. Few-shot prompting sistemático: mapeamento do eval set, correção de bugs estruturais e estabilização por camada](#20-few-shot-prompting-sistemático-mapeamento-do-eval-set-correção-de-bugs-estruturais-e-estabilização-por-camada)
 
 ## 1. Por que RAG neste projeto
 
@@ -1043,4 +1044,63 @@ Nenhuma das duas rodadas produziu um cenário de produção onde query rewriting
 
 - Few-shot prompting sistemático, usando o eval set de 28 casos já validado.
 - Detecção de mensagem fragmentada permanece opcional, adiada — decisão de retomar apenas ao preparar o Max para uma configuração de apresentação, não de estudo.
+- Próxima fase do roadmap de estudos após consolidar Max: banco de dados (SQL/PostgreSQL/vector DBs), antes da fase de memória/tool calling/agents.
+## 20. Few-shot prompting sistemático: mapeamento do eval set, correção de bugs estruturais e estabilização por camada
+
+Com query rewriting e HyDE descartados (Seção 19), o próximo passo do roadmap era few-shot prompting sistemático: em vez de reagir pontualmente a casos que quebravam (como já havia acontecido em `verificar_informacao_suficiente`, na seção "Seleção da política aplicável" de `system.txt`, e na granularidade por tópico da Seção 18), usar o eval set de 28 casos já validado para mapear classes de ambiguidade de forma deliberada e escolher exemplos representativos de cada uma — não só cobrir o próximo caso que aparecesse.
+
+A decisão de adiar esse trabalho até depois da migração da base para PDF (Seção 17) foi deliberada: escrever exemplos few-shot em cima de uma estrutura de retrieval que ainda ia mudar (chunking pai-filho, granularidade diferente do `politicas.txt` original) arriscaria precisar reescrever tudo depois. Com a base estável e o eval set de 28 casos passando limpo (Seção 18), essa condição estava satisfeita.
+
+### Auditoria do eval set: revisitando expectativas antigas, não só comportamento novo
+
+Antes de escrever qualquer exemplo few-shot, cada grupo de casos do eval set foi revisitado individualmente, testando contra o comportamento real do pipeline (não só a leitura do código) — isso revelou que nem toda "limitação conhecida" documentada continuava sendo, de fato, uma limitação real, e que nem todo caso sem `limitacao_conhecida` estava, na prática, cobrindo o estágio certo do pipeline.
+
+**Casos que se mostraram fora do escopo do few-shot (decisão determinística, não geração):** o grupo de saudação (`is_greeting`) e o grupo de contexto encontrado (`should_find_context`) são resolvidos inteiramente fora do LLM — o primeiro por similarity search contra um vectorstore de exemplos com threshold 0.85, o segundo pelo `score_threshold` do `RetrieverPaiFilho`. Nenhum dos dois passa por um modelo generativo na decisão, então few-shot não se aplica a eles — a mesma lógica que já havia descartado o caso adversarial `"salve meu número de rastreamento"` como candidato a exemplo.
+
+**Reembolso verboso — expectativa desatualizada, não bug do sistema.** O caso `"meu reembolso está demorando um pouco mais que o esperado..."`, documentado como `limitacao_conhecida: true` (`grounding_should_fail: true`), foi testado e o Max respondeu citando quase literalmente a Seção 4.3 do PDF ("acionar o suporte informando o número do protocolo de aprovação original"). Comparando com o texto-fonte, a resposta estava corretamente fundamentada — `verificar_grounding` retornando `False` (não falhou) estava certo. A causa raiz: a Seção 4.3 não existia na base de conhecimento antiga (`politicas.txt`) e foi adicionada só na migração para PDF — o eval set nunca foi atualizado para refletir essa nova cobertura. Corrigido para `grounding_should_fail: false`, `limitacao_conhecida: false`.
+
+**Atraso leve sem contexto suficiente — gap de cobertura, não de comportamento.** O caso `"meu pedido está atrasado só um pouco, ainda não chegou mas também não sumiu, o que eu faço?"` (grupo `grounding_should_fail`) foi testado via `main.py` e revelou ser interceptado por `needs_more_information` antes de chegar à geração — comportamento correto (a pergunta não informa região nem tempo decorrido), mas nunca documentado como tal. Mantido o teste original de `grounding_should_fail` como validação isolada da função (útil por si só), e adicionado um segundo caso com `intercepta_em: "needs_more_information"`, documentando o comportamento real do pipeline ponta a ponta — mesmo padrão dual já usado para os dois casos de extravio sem indicação de país.
+
+### Bug estrutural encontrado durante a auditoria: `"quero sair"` nunca era reconhecido
+
+Testando o grupo `should_find_context`, o caso `"quero sair"` (`limitacao_conhecida: true`) revelou a causa raiz: `main.py` comparava `pergunta.lower() == 'sair'` (string exata), herdada da primeira linha de código do projeto, ~2 meses atrás, criada como placeholder e nunca generalizada. `"quero sair"` não batia com essa comparação e caía no fallback padrão de "não entendi".
+
+**Correção adotada — mesmo padrão arquitetural do `eh_saudacao`:** em vez de expandir a comparação de string com mais variações (frágil por natureza), foi criado um vectorstore de intenção de saída (`carregar_indice_saida()`, em `inicializacao.py`) com exemplos como `'sair'`, `'quero sair'`, `'tchau'`, `'encerrar conversa'`, e uma função `eh_intencao_saida()` (`busca_semantica.py`) que faz `similarity_search_with_relevance_scores` com o mesmo threshold de 0.85 já validado para saudação. Integrado em `main.py` como primeira checagem do loop, antes até da saudação.
+
+**Benefício de custo, não só de robustez:** por ser resolvido via embedding (uma passada de inferência para gerar o vetor, sem geração token a token) em vez de uma chamada completa de chat/completion, o custo é ordens de grandeza menor que uma chamada ao `gpt-4o-mini` — e, como a pergunta do cliente já seria embedded de qualquer forma para o retriever principal caso não fosse saída, o custo incremental dessa nova checagem é mínimo.
+
+Testado com sucesso via `main.py` real. Caso do eval set corrigido para `intercepta_em: "saida"`, `limitacao_conhecida: false` — e `avaliar_intercepta_em()`, em `tests/test_eval_set.py`, precisou ser atualizado para incluir esse novo estágio como primeira etapa checada (a função replica a sequência real de `main.py`, então uma mudança na ordem real do pipeline exige a mesma mudança na função de avaliação — um gap que, se não corrigido, faria o novo caso reportar falha inesperada mesmo com o comportamento real correto).
+
+### Escrevendo o few-shot: três exemplos representativos, não reação a um único caso
+
+Com o eval set auditado, três classes de ambiguidade foram escolhidas para exemplos few-shot na nova seção `## Exemplos`, adicionada ao final de `system.txt`:
+
+1. **Nenhuma política aplicável.** Caso "troca por produto de valor maior, pagando a diferença" — nenhuma seção do PDF cobre esse cenário. O exemplo ensina a não generalizar por analogia com políticas parecidas (reenvio de item incorreto, reembolso por avaria) quando a condição de aplicabilidade não corresponde, e a nomear a lacuna explicitamente em vez de inferir uma solução.
+2. **Seleção entre políticas sobrepostas.** Extravio relatado diretamente pelo cliente (Seção 2.3, dispensa espera de 48h) vs. atraso confirmado (Seção 2.2, exige aguardar 48h antes de investigação) — mesmo tema, condições de aplicabilidade diferentes, risco de misturar as duas.
+3. **Regra nacional vs. internacional na geração.** Extravio para Portugal — a regra doméstica (relato direto já basta) não pode ser aplicada a um destino internacional, que exige confirmação formal da transportadora parceira (Capítulo 6). Estende para a camada de geração a mesma distinção que a Seção 18 já havia mapeado para `needs_more_information`.
+
+### Instabilidade real: identificando a camada certa para resolver, não só o sintoma
+
+O caso de "troca por produto de valor maior" (limitação conhecida em `needs_more_information: false`) foi revisitado sob o argumento de que não é um caso raro — é um tipo de pergunta plausível em qualquer fluxo real de atendimento de e-commerce, o que descartou tratá-lo como limitação aceitável.
+
+**Teste de estabilidade de `verificar_informacao_suficiente()`:** 10 execuções da mesma pergunta retornaram 6x `False` / 3x `True` (`verificar_informacao_suficiente` com `temperature=0`) — instabilidade real, mesmo com um exemplo few-shot quase idêntico já presente no prompt dessa função (`"posso trocar meu pedido por outro produto de valor maior?"` → NÃO). Testado também com `model_kwargs={"seed": 42}` — a variação persistiu (3/10 ainda divergentes), descartando o `seed` como solução suficiente para esse caso.
+
+**Diagnóstico:** o critério de `verificar_informacao_suficiente()` ("falta um dado do pedido — região, prazo, data?") não é o critério certo para esse caso. A pergunta não carece de dado do pedido; carece de uma política que dê ao Max autoridade para decidir. Forçar essa segunda categoria a se encaixar no critério da primeira é a causa provável da instabilidade — a função está sendo usada fora do seu propósito, não mal calibrada.
+
+**Correção: não mexer em `verificar_informacao_suficiente()`.** A decisão de "o Max tem autoridade para resolver isso sozinho, ou precisa reconhecer o limite e escalar?" já pertence semanticamente à camada de geração + `verificar_grounding()` — exatamente onde o Exemplo 1 do novo few-shot foi escrito. Testado com 10 execuções de `verificar_grounding()` para o mesmo caso, já com o `system.txt` atualizado: resposta **idêntica** e `grounding_falhou = True` em 10/10 execuções — instabilidade eliminada por completo nessa camada.
+
+`verificar_informacao_suficiente()` mantém sua instabilidade residual documentada, mas isso deixou de ser relevante para este caso específico: ele é resolvido de forma estável na camada correta do pipeline, não na camada originalmente questionada.
+
+### Resultado final
+
+Eval set expandido para 30 casos. Duas das três limitações conhecidas existentes no início da sessão foram resolvidas na raiz:
+
+- `"quero sair"`: bug estrutural de comparação de string, corrigido com detecção semântica (mesmo padrão do `eh_saudacao`).
+- Troca por produto de valor maior: instabilidade real, resolvida movendo a decisão para a camada correta do pipeline (few-shot em `system.txt`, não ajuste em `verificar_informacao_suficiente()`).
+
+Uma limitação conhecida permanece documentada e deliberadamente não tratada nesta etapa: reconhecimento de saudação em inglês (`"hello"`) — ver "Próximos passos" abaixo.
+
+### Próximos passos
+
+- **Tratamento de idioma (adição futura, não implementada):** a limitação do `"hello"` foi reavaliada à luz da migração para base internacional (Capítulo 6, Portugal/EUA) — a premissa original ("empresa só nacional, perguntas em inglês não deveriam acontecer") não é mais válida. Abordagem escolhida para quando isso for implementado: detecção de idioma como camada determinística e separada no início do pipeline (não instrução ao LLM), com resposta nativa no idioma detectado — não tradução (custo alto, considerado apenas para produção com precificação diferenciada) nem escalonamento automático a humano (dependeria de atendente fluente ou ferramenta de tradução não confiável). Confirmado que a base de conhecimento não precisa ser duplicada: os embeddings da OpenAI são multilíngues por natureza (retrieval cruzado pt/en, a validar empiricamente antes de confiar, no mesmo espírito da calibração de `score_threshold`), e o modelo de geração já lê contexto em português e responde em outro idioma nativamente — o trabalho seria estender os exemplos few-shot já existentes (saudação, `system.txt`) para os idiomas suportados, mais a camada de detecção.
 - Próxima fase do roadmap de estudos após consolidar Max: banco de dados (SQL/PostgreSQL/vector DBs), antes da fase de memória/tool calling/agents.
