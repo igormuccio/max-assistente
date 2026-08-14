@@ -26,11 +26,11 @@ llm_verificador = ChatOpenAI(
         temperature=0
     )
 
-pergunta = 'Meu pedido foi extraviado'
+pergunta = 'meu pedido chegou amassado, posso trocar por outro produto de valor maior pagando a diferença?'
 
 contexto = buscar_contexto(retriever, pergunta)
 
-for i in range(5):
+for i in range(10):
     reply = gerar_resposta_max(llm_chat, system_prompt, contexto, pergunta)
     grounding_falhou = verificar_grounding(llm_verificador, pergunta, contexto, reply)
 

@@ -85,9 +85,14 @@
     "limitacao_conhecida": false
   },
   {
+    "pergunta": "meu pedido está atrasado só um pouco, ainda não chegou mas também não sumiu, o que eu faço?",
+    "checks": { "intercepta_em": "needs_more_information" },
+    "limitacao_conhecida": false
+  },
+  {
     "pergunta": "meu reembolso está demorando um pouco mais que o esperado, quantos dias a mais eu devo aguardar antes de me preocupar?",
-    "checks": { "grounding_should_fail": true },
-    "limitacao_conhecida": true
+    "checks": { "grounding_should_fail": false },
+    "limitacao_conhecida": false
   },
   {
     "pergunta": "meu pedido foi extraviado, o que eu faço?",
@@ -122,7 +127,7 @@
   {
     "pergunta": "meu pedido chegou amassado, posso trocar por outro produto de valor maior pagando a diferença?",
     "checks": { "needs_more_information": false },
-    "limitacao_conhecida": true
+    "limitacao_conhecida": false
   },
   {
     "pergunta": "meu pedido foi extraviado, o que eu faço?",

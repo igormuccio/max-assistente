@@ -11,8 +11,8 @@ load_dotenv()
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from inicializacao import carregar_prompt, carregar_base_conhecimento, carregar_indice_saudacoes
-from busca_semantica import buscar_contexto, eh_saudacao
+from inicializacao import carregar_prompt, carregar_base_conhecimento, carregar_indice_saudacoes, carregar_indice_saida
+from busca_semantica import buscar_contexto, eh_saudacao, eh_intencao_saida
 from verificacao_llm import verificar_grounding, verificar_informacao_suficiente
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -78,7 +78,10 @@ def avaliar_resposta_contem(pergunta, retriever, llm_chat, system_prompt, texto_
     return texto_esperado.upper() in reply.upper()
 
 
-def avaliar_intercepta_em(pergunta, vectorstore_saudacoes, llm_verificador, retriever, **kwargs):
+def avaliar_intercepta_em(pergunta, vectorstore_saida, vectorstore_saudacoes, llm_verificador, retriever, **kwargs):
+    if eh_intencao_saida(vectorstore_saida, pergunta):
+        return 'saida'
+
     if eh_saudacao(vectorstore_saudacoes, pergunta):
         return 'saudacao'
 
@@ -137,6 +140,7 @@ def main():
     system_prompt = carregar_prompt()
     retriever = carregar_base_conhecimento()
     vectorstore_saudacoes = carregar_indice_saudacoes()
+    vectorstore_saida = carregar_indice_saida()
 
     llm_chat = ChatOpenAI(model='gpt-4o-mini', temperature=0.3)
     llm_verificador = ChatOpenAI(model='gpt-4o-mini', temperature=0)
@@ -144,6 +148,7 @@ def main():
     contexto_execucao = {
         'retriever': retriever,
         'vectorstore_saudacoes': vectorstore_saudacoes,
+        'vectorstore_saida': vectorstore_saida,
         'llm_chat': llm_chat,
         'llm_verificador': llm_verificador,
         'system_prompt': system_prompt,
