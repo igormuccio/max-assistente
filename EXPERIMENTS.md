@@ -30,6 +30,12 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [19. Query rewriting e HyDE: resultado negativo — nenhuma técnica encontrou cenário real de uso](#19-query-rewriting-e-hyde-resultado-negativo--nenhuma-técnica-encontrou-cenário-real-de-uso)
 - [20. Few-shot prompting sistemático: mapeamento do eval set, correção de bugs estruturais e estabilização por camada](#20-few-shot-prompting-sistemático-mapeamento-do-eval-set-correção-de-bugs-estruturais-e-estabilização-por-camada)
 
+---
+
+# Parte 4 — Memória de conversa e tool calling
+
+- [21. Memória de conversa e tool calling: da primeira integração de banco de dados no Max à decisão de arquitetura para retomada de assunto](#21-memória-de-conversa-e-tool-calling-da-primeira-integração-de-banco-de-dados-no-max-à-decisão-de-arquitetura-para-retomada-de-assunto)
+
 ## 1. Por que RAG neste projeto
 
 O Max responde perguntas sobre políticas de uma empresa fictícia de entregas. Um LLM genérico não tem conhecimento sobre essas políticas — sem RAG, ele responderia com base em suposições (alucinação) ou se recusaria a responder. RAG resolve isso buscando, a cada pergunta, apenas o trecho relevante da base de conhecimento e injetando esse trecho no prompt, em vez de:
@@ -1104,3 +1110,112 @@ Uma limitação conhecida permanece documentada e deliberadamente não tratada n
 
 - **Tratamento de idioma (adição futura, não implementada):** a limitação do `"hello"` foi reavaliada à luz da migração para base internacional (Capítulo 6, Portugal/EUA) — a premissa original ("empresa só nacional, perguntas em inglês não deveriam acontecer") não é mais válida. Abordagem escolhida para quando isso for implementado: detecção de idioma como camada determinística e separada no início do pipeline (não instrução ao LLM), com resposta nativa no idioma detectado — não tradução (custo alto, considerado apenas para produção com precificação diferenciada) nem escalonamento automático a humano (dependeria de atendente fluente ou ferramenta de tradução não confiável). Confirmado que a base de conhecimento não precisa ser duplicada: os embeddings da OpenAI são multilíngues por natureza (retrieval cruzado pt/en, a validar empiricamente antes de confiar, no mesmo espírito da calibração de `score_threshold`), e o modelo de geração já lê contexto em português e responde em outro idioma nativamente — o trabalho seria estender os exemplos few-shot já existentes (saudação, `system.txt`) para os idiomas suportados, mais a camada de detecção.
 - Próxima fase do roadmap de estudos após consolidar Max: banco de dados (SQL/PostgreSQL/vector DBs), antes da fase de memória/tool calling/agents.
+
+---
+
+# Parte 4 — Memória de conversa e tool calling
+
+## 21. Memória de conversa e tool calling: da primeira integração de banco de dados no Max à decisão de arquitetura para retomada de assunto
+
+### Contexto e motivação
+
+Até este ponto, o Max nunca havia integrado banco de dados em produção — todo o trabalho de PostgreSQL/SQLAlchemy/pgvector (modelagem relacional, CRUD, extensão vetorial) tinha sido feito isoladamente no repositório de estudos, como aprendizado. As tabelas `clientes`, `conversas` e `mensagens` já existiam no banco `max_db`, mas nada no código do Max se conectava a elas.
+
+Essa sessão cobre a primeira integração real de banco de dados no Max, motivada por um problema concreto: como fazer o Max reconhecer quando um cliente está retomando um assunto de uma conversa anterior (ex: "e como ficou meu extravio?"), sem repetir explicações já dadas.
+
+### Memória de conversa: o que já existia vs. o que faltava
+
+`main.py` já reenvia o histórico completo da conversa a cada chamada — a lista `messages` é criada uma única vez, fora do laço principal, e cresce via `.append()` a cada turno. Isso já é "memória de curto prazo" no sentido técnico correto (o modelo é stateless; é o código que reconstrói o contexto a cada chamada), mas com duas limitações reconhecidas:
+
+1. Essa memória existe só durante a execução do processo Python — nada é persistido entre execuções diferentes do programa.
+2. Não existe nenhum tratamento de crescimento de histórico (limite de tamanho, resumo, poda) — problema já identificado anteriormente e listado como pendência.
+
+Esta sessão endereça a primeira limitação (persistência), não a segunda (crescimento/custo do histórico em memória), que segue como item futuro.
+
+### Decisão de identificação de cliente: fora do fluxo de chat, não dentro dele
+
+Uma pergunta central antes de qualquer implementação: como simular múltiplos clientes de forma fiel a um chatbot de e-commerce real, sem inventar um sistema de login completo?
+
+A primeira ideia — perguntar o e-mail do cliente como parte da conversa — foi descartada por não refletir como um chatbot de atendimento real funciona: nenhum widget de chat embutido num site pergunta "qual seu e-mail?" como primeira mensagem. Em produção, se o cliente está logado no site, essa identificação já aconteceu numa camada anterior (o backend do site já sabe o `cliente_id` e passa isso para o chatbot via sessão/token); o widget "já sabe" quem é o cliente antes da primeira mensagem aparecer.
+
+A decisão adotada foi simular essa camada de "login prévio" fora do laço de chat, não como uma pergunta do Max dentro dele: no início de `main()`, antes do `while True:`, um `input()` simula o dado que já viria de um sistema de sessão/login real. É uma simplificação consciente e documentável — o que foi simplificado (autenticação de verdade: senha, JWT, sessão criptografada) e o que foi mantido fiel (a arquitetura de *onde* a identidade do cliente entra no sistema) ficam claros o suficiente para defender em entrevista.
+
+Número de pedido, por outro lado, continua sendo algo que o Max pergunta *dentro* da conversa quando o tópico exigir (rastreamento, atraso, extravio) — porque isso é dado de contexto pontual da pergunta, não identidade do cliente. São dois dados de natureza diferente: um identifica quem está falando (resolvido fora do chat); o outro localiza o que está sendo discutido (resolvido dentro dele).
+
+### Decisão de arquitetura: julgamento do LLM vs. detecção determinística
+
+O padrão já estabelecido no Max para decisões de intenção é detecção determinística via embedding — `eh_saudacao()` e `eh_intencao_saida()` comparam a pergunta contra um vectorstore pequeno de exemplos, com threshold calibrado (0.85). A pergunta natural era: por que não usar o mesmo padrão para detectar retomada de assunto?
+
+A resposta está na natureza do espaço semântico de cada caso. Saudação e intenção de saída são espaços fechados e de baixa variabilidade — "oi", "bom dia", "tchau", "quero sair" giram em torno de um núcleo semântico compacto, cobrível com um punhado de exemplos representativos. Retomada de assunto é uma intenção aberta: "e aí, como ficou?", "vocês resolveram aquilo?", "ainda sobre meu problema", ou até implícita sem frase-gatilho nenhuma ("meu produto chegou quebrado, de novo"). Não existe um núcleo compacto para ancorar exemplos — qualquer conjunto fixo estaria sempre perseguindo casos que não previu.
+
+Esse é um critério de decisão real, não específico deste caso: classificação por embedding/vectorstore serve bem a intenções fechadas e de baixa variabilidade; julgamento por LLM (raciocínio semântico geral) serve melhor a intenções abertas, onde o custo extra por chamada compra generalização que um conjunto fixo de exemplos não alcança.
+
+A decisão adotada foi delegar essa detecção ao próprio LLM principal via **tool/function calling** — uma ferramenta `buscar_historico_anterior` que o modelo decide chamar ou não, com base no texto da pergunta. Esse caso de uso real (não um exemplo de tutorial genérico) foi usado como primeiro exercício prático de tool calling no roadmap de estudos.
+
+#### Mecânica de tool calling: duas chamadas, não uma
+
+O modelo nunca executa código — ele só decide e formata um pedido estruturado de chamada de função. Quem executa é o código Python. O ciclo completo, quando o modelo decide chamar a ferramenta, envolve duas chamadas de chat completion: uma primeira, onde o modelo recebe a pergunta e a lista de ferramentas disponíveis e decide se quer chamar alguma; e, se decidir, uma segunda, já com o resultado da função real disponível no histórico, para gerar a resposta final. Quando o modelo decide que não precisa da ferramenta, o custo permanece o de uma chamada só — o custo extra só existe quando a ferramenta é de fato acionada.
+
+Testado isoladamente antes de integrar no `main.py` (`tests/debug_tool_calling.py`, com a função mockada retornando um histórico fixo): o modelo reconheceu corretamente uma pergunta de retomada de assunto sem palavras-chave óbvias, decidiu chamar a ferramenta com o `cliente_id` correto, e incorporou o resultado mockado de forma coerente na resposta final — validando o mecanismo antes de qualquer integração real com banco de dados.
+
+### Reconciliando tool calling com streaming
+
+`main.py` usa `.stream()` para gerar a resposta ao cliente, mas tool calling exige ver a resposta *completa* antes de decidir se ela contém um pedido de chamada de função — streaming complica isso, já que seria necessário remontar o pedido de função pedaço por pedaço.
+
+A solução: a chamada de decisão (`llm_chat_com_tools.invoke(messages)`) usa `.invoke()`, não streaming — é rápida e só precisa checar `tool_calls`. A chamada de geração final continua usando `.stream()` normalmente, com um detalhe já validado antes: o texto é bufferizado por completo (`reply`) antes de ser exibido ao cliente, não impresso token a token. Essa não é uma escolha estética — é uma dependência real da arquitetura de verificação pós-geração do Max: as checagens de `TRANSFER_HUMANO` e `verificar_grounding()` rodam sobre o texto completo, e podem descartar o `reply` inteiro em favor de uma mensagem de transferência. Streaming token a token exibiria ao cliente uma resposta que o sistema ainda poderia decidir invalidar — quebrando exatamente essa proteção.
+
+### Primeira integração de banco de dados no Max: `src/db/`
+
+Como a integração de banco não existia no Max, o primeiro passo real foi trazer a camada de fundação — não só a função da ferramenta. Seguindo o princípio de que infraestrutura compartilhada (da qual outros módulos dependem) merece separação física dos módulos de feature (`busca_semantica.py`, `verificacao_llm.py`, que resolvem uma etapa específica do pipeline sem depender uns dos outros), foi criada uma pasta dedicada `src/db/`:
+
+- `models.py` — as classes `Cliente`, `Conversa`, `Mensagem`, mapeando o schema já validado e existente no `max_db` (sem os `CHECK` constraints de string vazia/só espaços, que já vivem no banco — este arquivo mapeia estrutura, não a recria).
+- `session.py` — `engine` e `obter_session()`, com a senha lida do `.env` via `Path(__file__).resolve().parents[2]` (dois níveis de profundidade a mais que `main.py`, que roda de `src/` e usa `load_dotenv()` sem path explícito).
+
+Decisão explícita: `max_db` passa a ser o banco próprio e exclusivo do Max — só o código de produção deve se conectar nele, não mais os scripts do repositório de estudos, que serão removidos dali no futuro.
+
+#### Bugs reais encontrados na integração
+
+Três problemas surgiram ao rodar o primeiro teste de conexão (`tests/debug_conexao_db.py`), todos resolvidos por depuração incremental:
+
+**Dependências ausentes.** `psycopg2-binary` e `sqlalchemy` nunca haviam sido instalados no `.venv` do Max — ambiente virtual completamente separado do repositório de estudos, mesmo rodando na mesma máquina.
+
+**`UnicodeDecodeError` ao conectar — sintoma, não causa.** O erro inicial (`'utf-8' codec can't decode byte 0xe7'`) sugeria problema de encoding na senha. A investigação real (`print(repr(os.getenv("DB_PASSWORD")))`) revelou `None` — a variável nunca havia sido adicionada ao `.env` do Max (só existia no `.env` do repositório de estudos). A connection string montada usava a string literal `"None"` como senha; o PostgreSQL rejeitava a autenticação e retornava a mensagem de erro em um encoding que o `psycopg2` falhava ao decodificar. O erro de encoding era um efeito colateral de uma falha de autenticação anterior, não o problema em si.
+
+**Import quebrando fora de `src/`.** Scripts em `tests/` seguem o padrão já estabelecido no projeto (`sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))` no topo do arquivo, antes dos demais imports) — permitindo rodar de qualquer diretório sem depender de `cd src` antes. O botão de "play" do VS Code, notavelmente, não replica esse comportamento por si só, tornando esse padrão necessário e não apenas conveniente.
+
+### Estrutura de tools: pacote dedicado, pensando em escala
+
+Assim como `db/`, a decisão foi por um pacote dedicado `src/tools/` — não um arquivo único `ferramentas.py` — pensando na sequência já mapeada do roadmap (MCP, agents), que provavelmente vai adicionar mais ferramentas: cada uma em seu próprio arquivo (`historico.py` para `buscar_historico_anterior`), com `__init__.py` centralizando e exportando a lista (`todas_as_tools`) consumida por `main.py`. Um padrão mais avançado — separar a definição da ferramenta (schema) da lógica de negócio que ela executa, comum em sistemas com muitas tools reutilizando lógica em contextos diferentes — foi considerado e adiado por complexidade desnecessária neste estágio, mesmo raciocínio já aplicado à decisão sobre o padrão repository em `db/`.
+
+#### `buscar_historico_anterior`: critério de corte por tempo, não por volume
+
+A primeira formulação cogitada — trazer só a última `Conversa` do cliente — falha num cenário real e concreto: um cliente que reclama diariamente do mesmo pedido gera múltiplas conversas separadas por sessão; filtrar por "última conversa" perderia o contexto das anteriores, mesmo sendo extremamente recentes e relevantes. Um critério alternativo — últimas N mensagens fixas — tem o problema inverso: uma única troca intensa dentro de uma janela de tempo curta poderia facilmente ultrapassar um número fixo pequeno.
+
+A decisão final: filtrar por **janela de tempo** (últimos 30 dias), não por volume nem por sessão — com um teto de segurança de 150 mensagens existindo apenas como proteção contra volume patológico, não como critério principal. Isso resolve o cenário identificado (reclamações diárias dentro do mesmo mês continuam todas visíveis, independente de quantas sessões separadas geraram) sem introduzir a fragilidade do corte por sessão ou por contagem fixa.
+
+O retorno da função é montado inteiramente em Python (loop e f-strings sobre os dados brutos do banco) — nenhuma chamada de LLM está envolvida nessa etapa. A síntese natural do histórico para o cliente acontece só na chamada de geração final que já existia; formatar o retorno de forma mais ou menos "pronta" muda apenas quanto trabalho de leitura o modelo faz dentro dessa chamada, não adiciona uma chamada extra em nenhum dos dois casos.
+
+**Limitação conhecida, documentada e não resolvida nesta etapa:** o filtro por janela de tempo é, por natureza, um vetor de abuso de custo. Um cliente malicioso poderia gerar um volume alto de mensagens baratas (busca semântica de saudação/saída, não geração completa) para inflar deliberadamente o histórico trazido por `buscar_historico_anterior`, encarecendo chamadas futuras de geração sempre que a ferramenta fosse acionada. A mitigação real (rate limiting, limite de tamanho por mensagem) depende de uma camada de API/deploy ainda não implementada no roadmap — fica registrada como pendência a revisar quando essa camada existir, não resolvida agora.
+
+### Identificação de cliente e persistência de mensagens
+
+`identificar_cliente(session)` simula o "login do site" descrito acima: pede um e-mail, busca um `Cliente` existente por esse e-mail ou cria um novo. Uma `Conversa` nova é criada a cada execução do programa, associada a esse cliente. Essa lógica passou a viver dentro de um bloco `with obter_session() as session:` que agora envolve o `while True:` inteiro — mudança estrutural real em relação ao `main.py` anterior, necessário porque a sessão precisa permanecer aberta durante toda a conversa (não só por chamada isolada) para que a persistência de mensagens, abaixo, funcione dentro do mesmo contexto transacional.
+
+A persistência de cada `Mensagem` (pergunta do cliente e resposta do Max) foi implementada com um timing deliberado, não simplesmente ao final do turno: a pergunta do cliente é salva e commitada assim que o contexto relevante é encontrado — **antes** de qualquer chamada ao LLM. Isso garante que a pergunta persista mesmo que a conversa seja interrompida logo depois por uma transferência para atendente humano (`TRANSFER_HUMANO` ou `grounding_falhou`). A resposta do Max, por sua vez, só é salva **depois** de passar pelas duas checagens pós-geração — porque, nesses casos de transferência, o Max nunca chega a gerar uma resposta "de verdade" para persistir.
+
+Vale registrar explicitamente o escopo dessa cobertura: saudação, pedido de mais informação (`verificar_informacao_suficiente`) e intenção de saída usam `continue`/`break` *antes* de alcançar esse trecho de persistência — nenhum desses três caminhos gera uma linha em `Mensagem` hoje. A cobertura implementada resolve especificamente o caso de transferência após tentativa de resposta; os demais casos ficam como escopo não coberto nesta etapa, não como bug.
+
+### Validação em produção real
+
+Com a integração completa, o fluxo foi testado de ponta a ponta contra o `max_db` real (não mais scripts isolados de estudo):
+
+- **Identificação de cliente:** confirmado via query direta no banco — um `Cliente` criado com nome e e-mail corretos, uma `Conversa` associada corretamente ao `cliente_id`. Login recorrente (mesmo e-mail, segunda execução) reconheceu o cliente existente sem recriar registro.
+- **Tool calling — comportamento correto validado, não apenas funcional:** uma pergunta com dados completos e nenhum sinal linguístico de retomada ("meu pedido atrasado no Sul, teve alguma novidade?") corretamente **não** acionou `buscar_historico_anterior` — o modelo não chama a ferramenta "porque existe", só quando o texto de fato sugere necessidade de contexto externo. O critério linguístico que diferencia os dois casos: uma referência sem antecedente resolvido dentro da própria mensagem ("e aí, teve alguma novidade **sobre isso**?", sem menção ao assunto na mesma frase) sinaliza retomada, forçando o modelo a buscar fora da mensagem atual; quando o assunto já está explícito na própria frase, não há nada "pendurado" para resolver externamente.
+- **Persistência confirmada via query real:** em duas execuções de teste, a pergunta do cliente foi persistida em ambas (validando o timing "salvar antes do LLM"); a resposta do Max foi persistida apenas na execução que não terminou em transferência — exatamente o comportamento desenhado.
+
+### Próximos passos
+
+- Cobrir persistência de mensagens para os caminhos de saudação, pedido de mais informação e intenção de saída (hoje fora do escopo implementado).
+- Mitigação do vetor de custo do filtro de 30 dias em `buscar_historico_anterior`, quando a camada de API/deploy existir.
+- Migração real do FAISS para pgvector no Max (adiada desde a etapa de banco vetorial, para evitar retrabalho até este bloco de memória/tool calling estar concluído).
+- Próxima fase do roadmap: structured output, MCP, agents.
