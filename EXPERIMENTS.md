@@ -23,18 +23,14 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 
 ---
 
-# Parte 2 — Experimento de escala: migração para base em PDF
+# Parte 2 — Depois da migração para base em PDF: evoluções e novas dependências
 
 - [17. Migração da base de conhecimento para PDF: extração estrutural via metadados de fonte](#17-migração-da-base-de-conhecimento-para-pdf-extração-estrutural-via-metadados-de-fonte)
 - [18. Ambiguidade nacional/internacional: escopo de `needs_more_information` vs. query rewriting/HyDE](#18-ambiguidade-nacionalinternacional-escopo-de-needs_more_information-vs-query-rewritinghyde)
 - [19. Query rewriting e HyDE: resultado negativo — nenhuma técnica encontrou cenário real de uso](#19-query-rewriting-e-hyde-resultado-negativo--nenhuma-técnica-encontrou-cenário-real-de-uso)
 - [20. Few-shot prompting sistemático: mapeamento do eval set, correção de bugs estruturais e estabilização por camada](#20-few-shot-prompting-sistemático-mapeamento-do-eval-set-correção-de-bugs-estruturais-e-estabilização-por-camada)
-
----
-
-# Parte 4 — Memória de conversa e tool calling
-
 - [21. Memória de conversa e tool calling: da primeira integração de banco de dados no Max à decisão de arquitetura para retomada de assunto](#21-memória-de-conversa-e-tool-calling-da-primeira-integração-de-banco-de-dados-no-max-à-decisão-de-arquitetura-para-retomada-de-assunto)
+- [22. Transferência inesperada pós-tool-calling: separando duas causas distintas e uma regra de negócio desatualizada](#22-transferência-inesperada-pós-tool-calling-separando-duas-causas-distintas-e-uma-regra-de-negócio-desatualizada)
 
 ## 1. Por que RAG neste projeto
 
@@ -687,12 +683,13 @@ Ordenados pela sequência de cobertura planejada, não pela ordem de descoberta.
 - **Crescimento ilimitado do histórico de mensagens:** `messages` acumula toda a conversa (`HumanMessage` e `AIMessage`) sem nenhum mecanismo de limite, e a lista inteira é reenviada ao modelo a cada nova pergunta. Isso gera dois problemas reais em conversas longas: custo cumulativo crescente por mensagem (a N-ésima pergunta reenvia todas as N-1 anteriores), e risco de exceder a janela de contexto máxima do modelo, o que causaria falha na chamada. É uma limitação já ativa hoje, não apenas hipotética — mas invisível no padrão de uso atual, porque as sessões de teste realizadas até aqui nunca foram longas o suficiente para o sintoma se manifestar de forma perceptível (nem em custo, nem em erro de janela excedida).
   Duas abordagens comuns resolvem isso, cada uma com trade-off diferente: **janela de mensagens recentes** (`ConversationBufferWindowMemory` do LangChain, ou truncamento manual — mecanicamente a mesma solução, via biblioteca ou código próprio), que mantém só as últimas N mensagens sem custo de chamada adicional, mas corre o risco de descartar informação relevante mencionada fora da janela (ex.: região do cliente, dita no início de uma conversa longa); e **memória com resumo periódico**, em que uma chamada ao LLM condensa o histórico acumulado quando um limite é atingido (não a cada mensagem), preservando mais contexto relevante ao custo de uma chamada extra periódica.
   Não implementado agora: testar isso de forma significativa exigiria criar cenários de conversa longa manualmente, o que não compensa o esforço no estágio atual do projeto — mais sensato avaliar quando houver uma base de conhecimento maior e um processo de testes automatizados em vigor (eval set, e possivelmente os frameworks descritos acima), em vez de simular manualmente conversas extensas agora. Corresponde à Fase 3 do roadmap de estudos ("Memória de conversa"). Assim como as demais decisões de custo deste documento, essa é uma escolha calibrada para o volume de uso de um projeto de estudos; em produção, com conversas mais longas e recorrentes, o mesmo problema deixaria de ser tolerável e a implementação de uma das duas abordagens passaria a ser necessária, não opcional.
+> Atualização: a Seção 21 implementou memória de conversa, mas por um mecanismo diferente do descrito aqui — histórico entre sessões via `buscar_historico_anterior` (tool calling + banco de dados), não janela/resumo da lista `messages` em uso dentro de uma única sessão. O problema específico descrito neste item (crescimento ilimitado de `messages` dentro de uma sessão longa) segue em aberto, sem relação direta com a solução implementada.
 - **Detecção de mensagens fragmentadas ou incompletas:** cenário identificado na Seção 11, mas não implementado por exigir julgamento semântico (provavelmente via LLM), reintroduzindo custo de chamada por mensagem recebida.
 - **Cálculo de prazo restante personalizado (ex.: "falta 1 dia até o pedido entrar em atraso"):** identificado ao testar a nova regra de "atraso dentro do prazo" — a resposta do Max, mesmo fundamentada, é genérica ("aguarde mais um pouco"), porque o sistema não coleta nem retém dados específicos do pedido (região, data de compra) durante a conversa. Resolver isso exigiria o modelo perguntar essas informações e, mais importante, extraí-las de forma estruturada (não só texto livre) para permitir um cálculo real de data. Não implementado agora por abrir escopo novo (extração estruturada + lógica de cálculo), fora do que uma regra de conteúdo ou prompt resolveria sozinho. Fica planejado para quando `structured output` (Pydantic, JSON mode) for estudado, conforme o roadmap de estudos.
 
 ---
 
-# Parte 2 — Experimento de escala: migração para base em PDF
+# Parte 2 — Depois da migração para base em PDF: evoluções e novas dependências
 
 ## 17. Migração da base de conhecimento para PDF: extração estrutural via metadados de fonte
 
@@ -937,11 +934,10 @@ Eval set (26 casos) rodando limpo contra a base em PDF, com `score_threshold=0.7
 - Nenhuma pendência estrutural em aberto para a extração, o retriever ou a calibração de threshold contra a base em PDF.
 - Retomar, nesta ordem, os itens da Seção 16 que dependiam de uma base maior: (1) reavaliar query rewriting/HyDE, agora com base heterogênea o suficiente (múltiplos capítulos, tabela, regras contraditórias entre si) para o teste fazer sentido; (2) few-shot prompting sistemático, usando o eval set expandido; (3) decisão sobre detecção de mensagem fragmentada (opcional).
 - Memória/histórico de conversa continua adiado até o projeto passar a usar banco de dados (Fase 3 do roadmap de estudos), sem mudança nessa decisão nesta etapa.
+> Atualização: banco de dados e memória de conversa via tool calling implementados na Seção 21.
 - O item (1) acima passou por um desvio de escopo antes de chegar à implementação de fato — ver Seção 18.
 
 ---
-
-# Parte 3 — Reavaliação de query rewriting/HyDE contra a base em PDF
 
 ## 18. Ambiguidade nacional/internacional: escopo de `needs_more_information` vs. query rewriting/HyDE
 
@@ -1051,6 +1047,7 @@ Nenhuma das duas rodadas produziu um cenário de produção onde query rewriting
 - Few-shot prompting sistemático, usando o eval set de 28 casos já validado.
 - Detecção de mensagem fragmentada permanece opcional, adiada — decisão de retomar apenas ao preparar o Max para uma configuração de apresentação, não de estudo.
 - Próxima fase do roadmap de estudos após consolidar Max: banco de dados (SQL/PostgreSQL/vector DBs), antes da fase de memória/tool calling/agents.
+> Atualização: banco de dados implementado e memória/tool calling concluídos na Seção 21; próxima fase real do roadmap passa a ser structured output, MCP e agents.
 ## 20. Few-shot prompting sistemático: mapeamento do eval set, correção de bugs estruturais e estabilização por camada
 
 Com query rewriting e HyDE descartados (Seção 19), o próximo passo do roadmap era few-shot prompting sistemático: em vez de reagir pontualmente a casos que quebravam (como já havia acontecido em `verificar_informacao_suficiente`, na seção "Seleção da política aplicável" de `system.txt`, e na granularidade por tópico da Seção 18), usar o eval set de 28 casos já validado para mapear classes de ambiguidade de forma deliberada e escolher exemplos representativos de cada uma — não só cobrir o próximo caso que aparecesse.
@@ -1110,10 +1107,9 @@ Uma limitação conhecida permanece documentada e deliberadamente não tratada n
 
 - **Tratamento de idioma (adição futura, não implementada):** a limitação do `"hello"` foi reavaliada à luz da migração para base internacional (Capítulo 6, Portugal/EUA) — a premissa original ("empresa só nacional, perguntas em inglês não deveriam acontecer") não é mais válida. Abordagem escolhida para quando isso for implementado: detecção de idioma como camada determinística e separada no início do pipeline (não instrução ao LLM), com resposta nativa no idioma detectado — não tradução (custo alto, considerado apenas para produção com precificação diferenciada) nem escalonamento automático a humano (dependeria de atendente fluente ou ferramenta de tradução não confiável). Confirmado que a base de conhecimento não precisa ser duplicada: os embeddings da OpenAI são multilíngues por natureza (retrieval cruzado pt/en, a validar empiricamente antes de confiar, no mesmo espírito da calibração de `score_threshold`), e o modelo de geração já lê contexto em português e responde em outro idioma nativamente — o trabalho seria estender os exemplos few-shot já existentes (saudação, `system.txt`) para os idiomas suportados, mais a camada de detecção.
 - Próxima fase do roadmap de estudos após consolidar Max: banco de dados (SQL/PostgreSQL/vector DBs), antes da fase de memória/tool calling/agents.
+> Atualização: banco de dados implementado e memória/tool calling concluídos na Seção 21; próxima fase real do roadmap passa a ser structured output, MCP e agents.
 
 ---
-
-# Parte 4 — Memória de conversa e tool calling
 
 ## 21. Memória de conversa e tool calling: da primeira integração de banco de dados no Max à decisão de arquitetura para retomada de assunto
 
@@ -1210,7 +1206,7 @@ Vale registrar explicitamente o escopo dessa cobertura: saudação, pedido de ma
 Com a integração completa, o fluxo foi testado de ponta a ponta contra o `max_db` real (não mais scripts isolados de estudo):
 
 - **Identificação de cliente:** confirmado via query direta no banco — um `Cliente` criado com nome e e-mail corretos, uma `Conversa` associada corretamente ao `cliente_id`. Login recorrente (mesmo e-mail, segunda execução) reconheceu o cliente existente sem recriar registro.
-- **Tool calling — comportamento correto validado, não apenas funcional:** uma pergunta com dados completos e nenhum sinal linguístico de retomada ("meu pedido atrasado no Sul, teve alguma novidade?") corretamente **não** acionou `buscar_historico_anterior` — o modelo não chama a ferramenta "porque existe", só quando o texto de fato sugere necessidade de contexto externo. O critério linguístico que diferencia os dois casos: uma referência sem antecedente resolvido dentro da própria mensagem ("e aí, teve alguma novidade **sobre isso**?", sem menção ao assunto na mesma frase) sinaliza retomada, forçando o modelo a buscar fora da mensagem atual; quando o assunto já está explícito na própria frase, não há nada "pendurado" para resolver externamente.
+- **Tool calling — comportamento funcional, critério de acionamento revisado na Seção 22:** o critério linguístico originalmente hipotetizado aqui (referência sem antecedente resolvido na própria mensagem, ex. "teve alguma novidade **sobre isso**?", sinalizando retomada) foi contradito por testes posteriores documentados na Seção 22 — a pergunta "meu pedido atrasado no Sul, teve alguma novidade?", apesar de ter dado completo e nenhuma referência pendurada, acionou `buscar_historico_anterior` de forma consistente em todos os testes reproduzidos. O critério real que leva o modelo a chamar a ferramenta se mostrou mais amplo do que o inicialmente suposto (ver Seção 22 para a investigação completa, motivada originalmente por uma transferência inesperada causada por esse mesmo acionamento).
 - **Persistência confirmada via query real:** em duas execuções de teste, a pergunta do cliente foi persistida em ambas (validando o timing "salvar antes do LLM"); a resposta do Max foi persistida apenas na execução que não terminou em transferência — exatamente o comportamento desenhado.
 
 ### Próximos passos
@@ -1219,3 +1215,43 @@ Com a integração completa, o fluxo foi testado de ponta a ponta contra o `max_
 - Mitigação do vetor de custo do filtro de 30 dias em `buscar_historico_anterior`, quando a camada de API/deploy existir.
 - Migração real do FAISS para pgvector no Max (adiada desde a etapa de banco vetorial, para evitar retrabalho até este bloco de memória/tool calling estar concluído).
 - Próxima fase do roadmap: structured output, MCP, agents.
+
+## 22. Transferência inesperada pós-tool-calling: separando duas causas distintas e uma regra de negócio desatualizada
+
+Durante um teste manual do fluxo de memória/tool calling recém-integrado, uma pergunta com dado completo ("meu pedido atrasado no Sul, teve alguma novidade?") gerou uma transferência inesperada para atendente humano — comportamento que não acontecia antes da introdução do tool calling, para o mesmo tipo de pergunta. A investigação levou por caminhos que pareciam confirmados e depois precisaram ser revisados, e terminou revelando dois fenômenos reais e independentes coexistindo no mesmo sintoma.
+
+### Hipótese inicial: histórico vazio confundido com status do pedido
+
+A primeira hipótese testada: quando `buscar_historico_anterior` não encontra nenhuma mensagem dentro da janela de 30 dias, ela retorna a string `"Nenhum histórico de conversa anterior encontrado nos últimos 30 dias."`. Para uma pergunta como "teve alguma novidade?", era plausível que o modelo reinterpretasse essa ausência de *histórico de conversa* como ausência de *novidade no status do pedido* — gerando uma afirmação sobre o pedido que nenhuma das duas fontes (contexto de política via RAG, ou o próprio resultado da tool) sustentava, e que `verificar_grounding()` corretamente rejeitaria.
+
+Essa hipótese foi testada com dados reais e parcialmente descartada: repetições da mesma pergunta, já com histórico presente no banco (incluindo a resposta correta anterior), continuaram gerando transferência — o que não é compatível com uma causa que dependeria de histórico vazio.
+
+### Lacuna de observabilidade descoberta no processo
+
+Nenhuma das falhas observadas até esse ponto tinha o `reply` gerado pelo modelo capturado — o banco (tabela `Mensagem`) só persiste pergunta e resposta final quando a resposta passa nas duas checagens pós-geração; nas transferências, nada é persistido além da pergunta do cliente. Sem essa informação, não havia como saber, a posteriori, qual texto o modelo tinha gerado nem qual dos dois caminhos de transferência (`TRANSFER_HUMANO` no texto, ou `grounding_falhou=True`) havia sido acionado.
+
+Um script de debug (`tests/debug_tool_calling_estabilidade.py`) foi criado para repetir a mesma pergunta N vezes de forma controlada, logando decisão de tool calling, presença do marcador `TRANSFER_HUMANO`, veredito de grounding e o `reply` completo a cada execução. Em duas baterias (10 execuções cada, 20 no total), o script nunca reproduziu a falha — resultado que, à primeira vista, pareceu confirmar apenas "instabilidade rara do modelo", mas que escondia uma diferença estrutural real: o script nunca persiste nada no banco, então nunca acumula histórico entre execuções — ao contrário da sessão manual real, onde repetir a pergunta entre execuções separadas do `main.py` faz o banco (e portanto o histórico devolvido pela tool) crescer a cada tentativa.
+
+### Causa real #1: uma regra de negócio acionada por uma fonte de dado que não existia quando foi escrita
+
+Adicionando um print do `reply` completo *antes* da checagem de `TRANSFER_HUMANO` (não só antes do grounding) e reproduzindo a falha com histórico já acumulado no banco (mesma pergunta e mesma resposta repetidas nele), o `reply` capturado revelou o marcador `###TRANSFER_HUMANO###` — um caminho de transferência distinto do `grounding_falhou`, com mensagem de saída diferente na interface (`"Aguarde, vou transferir para um atendente."` vs. `"Não tenho essa informação específica no momento..."`).
+
+A causa raiz: o `system.txt` já continha, desde antes da existência de memória entre sessões, a instrução de emitir `###TRANSFER_HUMANO###` quando *"o cliente permanecer insatisfeito após duas tentativas de solução"*. Antes do tool calling, essa regra só podia ser avaliada dentro da sessão atual — não existia nenhuma fonte de dado capaz de mostrar ao modelo uma repetição *entre* sessões. Com `buscar_historico_anterior` trazendo histórico entre execuções separadas, a mesma instrução — sem nenhuma mudança de texto — passou a ser satisfeita também por repetições de teste manual entre reinicializações do programa, algo que a regra nunca tinha sido escrita para considerar.
+
+**Decisão de produto:** manter o comportamento como está, sem alteração de código ou de prompt. O raciocínio: a probabilidade de um cliente real repetir organicamente a mesma pergunta em sessões distintas dentro da janela de 30 dias é estimada como próxima de zero; e quando isso de fato acontece, o resultado (escalonamento para um atendente humano) é o comportamento desejado — não um efeito colateral a corrigir. Um cliente que já retornou múltiplas vezes com a mesma questão sem solução provavelmente está mais bem atendido por um humano do que por mais uma resposta automatizada.
+
+### Causa real #2: uma única ocorrência de `grounding_falhou`, tratada como instabilidade já conhecida
+
+Isolando a pergunta original — sem histórico algum, testada em três clientes genuinamente novos, com o print do `reply` já em vigor antes de qualquer checagem — o pipeline passou limpo em todas as três execuções (`grounding_falhou=False`). Combinado com o fato de que a única falha confirmada nesse caminho específico (sem histórico, veredito de grounding, não `TRANSFER_HUMANO`) foi a primeira observação que abriu esta investigação, e de que as demais falhas do meio (que não tiveram o `reply` capturado) são candidatas fortes a já pertencerem à causa #1, a contagem real de ocorrências não explicadas de `grounding_falhou` nesse cenário caiu para uma única instância isolada.
+
+**Decisão:** tratar essa ocorrência como uma manifestação do baseline de instabilidade de grounding já documentado e aceito neste projeto (Seção 8 e seu adendo, taxa histórica observada em torno de 1/27 em geração com `temperature=0.3`), não como uma causa nova introduzida pelo tool calling. Uma única ocorrência em toda a bateria de testes não justifica investigação adicional — e replicar esse tipo de instabilidade sob demanda já era conhecido como estatisticamente difícil antes mesmo desta sessão.
+
+### Lição sobre o processo de investigação em si
+
+Vale registrar um padrão que se repetiu nesta sessão: uma hipótese "quase confirmada" (causa #1 explicando tudo) precisou ser corrigida a meio-caminho ao revisitar o primeiro dado coletado (a falha sem histórico, anterior à introdução do tool calling na conversa). Isso reforça um princípio já aplicado em investigações anteriores deste projeto (ex.: Seção 12, Seção 18): dados que não se encaixam na hipótese corrente não devem ser descartados silenciosamente — eles frequentemente indicam que mais de uma causa está presente no mesmo sintoma observado.
+
+### Próximos passos
+
+- Nenhuma ação de código pendente desta investigação — ambas as causas foram fechadas por decisão explícita (causa #1: comportamento mantido; causa #2: aceito como instabilidade conhecida).
+- Cobrir persistência de mensagens para os caminhos ainda não salvos (saudação, `verificar_informacao_suficiente`, intenção de saída) — item já identificado na Seção 21, ainda pendente.
+- Bateria de testes formal para validar a implementação de histórico como um todo (janela de 30 dias, teto de 150 mensagens, múltiplas conversas do mesmo cliente) antes de mergear a branch `experimento-memoria-tool-calling` na principal.
