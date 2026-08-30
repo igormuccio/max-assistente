@@ -12,14 +12,13 @@ logging.basicConfig(
 logging.captureWarnings(True)
 
 from inicializacao import carregar_prompt, carregar_base_conhecimento, carregar_indice_saudacoes, carregar_indice_saida
-from busca_semantica import buscar_contexto, eh_saudacao, eh_intencao_saida
-from verificacao_llm import verificar_grounding, verificar_informacao_suficiente
-from db.models import Cliente, Conversa, Mensagem
+from db.models import Cliente, Conversa
 from db.session import obter_session
 from tools import todas_as_tools
+from processamento import processar_pergunta
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import SystemMessage
 
 load_dotenv()
 
@@ -48,18 +47,9 @@ def main():
     vectorstore_saudacoes = carregar_indice_saudacoes()
     vectorstore_saida = carregar_indice_saida()
 
-    llm_chat = ChatOpenAI(
-        model='gpt-4o-mini',
-        temperature=0.3,
-        streaming=True
-    )
-
+    llm_chat = ChatOpenAI(model='gpt-4o-mini', temperature=0.3, streaming=True)
     llm_chat_com_tools = llm_chat.bind_tools(todas_as_tools)
-
-    llm_verificador = ChatOpenAI(
-        model='gpt-4o-mini',
-        temperature=0
-    )
+    llm_verificador = ChatOpenAI(model='gpt-4o-mini', temperature=0)
 
     with obter_session() as session:
         cliente = identificar_cliente(session)
@@ -67,86 +57,62 @@ def main():
         session.add(conversa)
         session.commit()
 
-        messages = [SystemMessage(content=system_prompt)]
-        tentativas_sem_contexto = 0
+        estado = {
+            'session': session,
+            'conversa': conversa,
+            'cliente': cliente,
+            'messages': [SystemMessage(content=system_prompt)],
+            'tentativas_sem_contexto': 0,
+            'retriever': retriever,
+            'vectorstore_saudacoes': vectorstore_saudacoes,
+            'vectorstore_saida': vectorstore_saida,
+            'llm_chat': llm_chat,
+            'llm_chat_com_tools': llm_chat_com_tools,
+            'llm_verificador': llm_verificador,
+        }
 
         print('Max: Olá! Sou o Max, assistente da XYZ Entregas. Como posso ajudar?')
 
         while True:
             pergunta = input('Você: ')
-            if eh_intencao_saida(vectorstore_saida, pergunta):
+            resultado = processar_pergunta(pergunta, estado)
+
+            if resultado['tipo'] == 'saida':
                 print('Max: Até mais!')
                 break
 
-            if eh_saudacao(vectorstore_saudacoes, pergunta):
+            if resultado['tipo'] == 'saudacao':
                 print('Max: Olá! Como posso te ajudar hoje?')
                 print()
                 continue
 
-            if verificar_informacao_suficiente(llm_verificador, pergunta):
+            if resultado['tipo'] == 'needs_more_information':
                 print('Max: Para te ajudar melhor, preciso de mais alguns detalhes. Você pode informar sua região e, se possível, há quantos dias fez o pedido?')
                 print()
                 continue
 
-            contexto = buscar_contexto(retriever, pergunta)
-
-            if not contexto.strip():
-                tentativas_sem_contexto += 1
-
-                if tentativas_sem_contexto >= 2:
+            if resultado['tipo'] == 'sem_contexto':
+                if resultado['transferiu']:
                     print('Max: Não consegui entender sua solicitação. Vou te transferir para um atendente.')
                     print('[Sistema]: Transferindo...')
                     break
-
                 print('Max: Não entendi muito bem sua pergunta. Você pode explicar de outra forma, com mais detalhes sobre seu pedido?')
                 print()
                 continue
 
-            tentativas_sem_contexto = 0
+            if resultado['tipo'] == 'resposta':
+                if resultado['motivo'] == 'transfer_humano':
+                    print('Max: Aguarde, vou transferir para um atendente.')
+                    print('[Sistema]: Transferindo...')
+                    break
 
-            mensagem_cliente = Mensagem(conversa_id=conversa.id, remetente='cliente', conteudo=pergunta)
-            session.add(mensagem_cliente)
-            session.commit()
+                if resultado['motivo'] == 'grounding_falhou':
+                    print('Max: Não tenho essa informação específica no momento, vou te transferir para um atendente humano que pode te ajudar melhor.')
+                    print('[Sistema]: Transferindo...')
+                    break
 
-            mensagem_com_contexto = f'{pergunta}\n\nInformações relevantes:\n{contexto}\n\nO cliente_id do cliente atual é {cliente.id}.'
-            messages.append(HumanMessage(content=mensagem_com_contexto))
-
-            resposta_decisao = llm_chat_com_tools.invoke(messages)
-
-            if resposta_decisao.tool_calls:
-                messages.append(resposta_decisao)
-
-                for chamada in resposta_decisao.tool_calls:
-                    tool_chamada = next(t for t in todas_as_tools if t.name == chamada['name'])
-                    resultado = tool_chamada.invoke(chamada['args'])
-                    messages.append(ToolMessage(content=resultado, tool_call_id=chamada['id']))
-
-            print('Max: ', end='', flush=True)
-            reply = ''
-            for chunk in llm_chat.stream(messages):
-                texto = chunk.content
-                if texto:
-                    reply += texto
-
-            if 'TRANSFER_HUMANO' in reply.upper():
-                print('Aguarde, vou transferir para um atendente.')
-                print('[Sistema]: Transferindo...')
-                break
-
-            grounding_falhou = verificar_grounding(llm_verificador, pergunta, contexto, reply)
-
-            if grounding_falhou:
-                print('Max: Não tenho essa informação específica no momento, vou te transferir para um atendente humano que pode te ajudar melhor.')
-                print('[Sistema]: Transferindo...')
-                break
-
-            print(reply)
-            print()
-            messages.append(AIMessage(content=reply))
-
-            mensagem_max = Mensagem(conversa_id=conversa.id, remetente='max', conteudo=reply)
-            session.add(mensagem_max)
-            session.commit()
+                print(f"Max: {resultado['reply']}")
+                print()
 
 
 if __name__ == '__main__':
