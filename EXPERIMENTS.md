@@ -31,6 +31,7 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [20. Few-shot prompting sistemático: mapeamento do eval set, correção de bugs estruturais e estabilização por camada](#20-few-shot-prompting-sistemático-mapeamento-do-eval-set-correção-de-bugs-estruturais-e-estabilização-por-camada)
 - [21. Memória de conversa e tool calling: da primeira integração de banco de dados no Max à decisão de arquitetura para retomada de assunto](#21-memória-de-conversa-e-tool-calling-da-primeira-integração-de-banco-de-dados-no-max-à-decisão-de-arquitetura-para-retomada-de-assunto)
 - [22. Transferência inesperada pós-tool-calling: separando duas causas distintas e uma regra de negócio desatualizada](#22-transferência-inesperada-pós-tool-calling-separando-duas-causas-distintas-e-uma-regra-de-negócio-desatualizada)
+- [23. Validação pré-merge: refatoração para testabilidade, cobertura de persistência e o critério real de acionamento da tool](#23-validação-pré-merge-refatoração-para-testabilidade-cobertura-de-persistência-e-o-critério-real-de-acionamento-da-tool)
 
 ## 1. Por que RAG neste projeto
 
@@ -1238,6 +1239,8 @@ Adicionando um print do `reply` completo *antes* da checagem de `TRANSFER_HUMANO
 
 A causa raiz: o `system.txt` já continha, desde antes da existência de memória entre sessões, a instrução de emitir `###TRANSFER_HUMANO###` quando *"o cliente permanecer insatisfeito após duas tentativas de solução"*. Antes do tool calling, essa regra só podia ser avaliada dentro da sessão atual — não existia nenhuma fonte de dado capaz de mostrar ao modelo uma repetição *entre* sessões. Com `buscar_historico_anterior` trazendo histórico entre execuções separadas, a mesma instrução — sem nenhuma mudança de texto — passou a ser satisfeita também por repetições de teste manual entre reinicializações do programa, algo que a regra nunca tinha sido escrita para considerar.
 
+> Atualização (Seção 23): um teste observacional posterior refinou a caracterização do critério de acionamento da tool em si. Não é ausência/presença de referência sintática pendurada (a hipótese original da Seção 21) — é se a pergunta pede uma **atualização de status ao longo do tempo** ("teve alguma novidade?") versus uma pergunta atemporal sobre política ("qual o prazo de entrega?"), mesmo as duas tendo dado geográfico igualmente completo. Ver Seção 23 para o teste e o resultado completo.
+
 **Decisão de produto:** manter o comportamento como está, sem alteração de código ou de prompt. O raciocínio: a probabilidade de um cliente real repetir organicamente a mesma pergunta em sessões distintas dentro da janela de 30 dias é estimada como próxima de zero; e quando isso de fato acontece, o resultado (escalonamento para um atendente humano) é o comportamento desejado — não um efeito colateral a corrigir. Um cliente que já retornou múltiplas vezes com a mesma questão sem solução provavelmente está mais bem atendido por um humano do que por mais uma resposta automatizada.
 
 ### Causa real #2: uma única ocorrência de `grounding_falhou`, tratada como instabilidade já conhecida
@@ -1255,3 +1258,87 @@ Vale registrar um padrão que se repetiu nesta sessão: uma hipótese "quase con
 - Nenhuma ação de código pendente desta investigação — ambas as causas foram fechadas por decisão explícita (causa #1: comportamento mantido; causa #2: aceito como instabilidade conhecida).
 - Cobrir persistência de mensagens para os caminhos ainda não salvos (saudação, `verificar_informacao_suficiente`, intenção de saída) — item já identificado na Seção 21, ainda pendente.
 - Bateria de testes formal para validar a implementação de histórico como um todo (janela de 30 dias, teto de 150 mensagens, múltiplas conversas do mesmo cliente) antes de mergear a branch `experimento-memoria-tool-calling` na principal.
+
+## 23. Validação pré-merge: refatoração para testabilidade, cobertura de persistência e o critério real de acionamento da tool
+
+Antes de mergear a branch `experimento-memoria-tool-calling` na principal, restava validar formalmente o que as Seções 21 e 22 tinham confirmado apenas de forma manual e pontual: o comportamento de `buscar_historico_anterior`, a persistência de mensagens, e a ausência de regressão no restante do pipeline. Esta seção documenta essa validação e uma refatoração estrutural que ela motivou.
+
+### Delimitando o que o eval set já cobre — e o que não cobre
+
+Antes de rodar qualquer coisa, foi preciso confirmar uma suposição: será que o eval set (`test_eval_set.py`) já cobre, ainda que indiretamente, o fluxo de login e tool calling? A resposta, confirmada lendo o script: não. `gerar_resposta_max()` monta `messages` do zero a cada caso e chama `llm_chat.invoke(messages)` sem `bind_tools` — o LLM usado na avaliação nem tem acesso à ferramenta. O eval set roda o pipeline de RAG isolado (retrieval, `needs_more_information`, grounding), exatamente como a separação em módulos da Seção 14 desenhou. Ele continua sendo um teste de regressão válido para essa parte do sistema, mas tem cobertura zero de tool calling, persistência, ou `identificar_cliente()` — não por lacuna acidental, mas por desenho: são responsabilidades que vivem fora das funções que ele testa.
+
+Isso definiu o escopo da validação: o eval set garante que nada do pipeline de RAG quebrou; tudo relacionado a memória entre sessões precisava de testes novos, dedicados.
+
+### `tests/test_historico.py`: validação formal de `buscar_historico_anterior`
+
+Cinco casos, testando a função diretamente via `.invoke({'cliente_id': ...})` (necessário porque o decorator `@tool` do LangChain transforma a função num objeto `BaseTool`, não uma função Python comum) contra um banco real, com timestamps inseridos manualmente no passado (não simulação de tempo real):
+
+1. Cliente sem histórico algum → retorna a string de fallback esperada.
+2. Janela de 30 dias → mensagem com 29 dias aparece, mensagem com 31 dias não aparece.
+3. Teto de 150 mensagens → de 155 mensagens inseridas, exatamente as 150 mais recentes retornam; a mais antiga (índice 0) está ausente, a borda do corte (índice 5) está presente, a mais recente (índice 154) está presente. Testar a borda, não só os extremos, confirma que o corte acontece exatamente em 150, não "em algum lugar perto disso".
+4. Múltiplas conversas do mesmo cliente → o filtro é por `Conversa.cliente_id` via `join`, não por uma `conversa_id` isolada; mensagens de uma conversa antiga aparecem numa consulta feita a partir de uma conversa nova.
+5. Ordem cronológica → mensagens retornam na ordem em que aconteceram, não na ordem inversa da query (`.desc()` seguido de `.reverse()` no código).
+
+**Resultado: 5/5 passou na primeira execução**, sem ajustes necessários.
+
+### Refatoração de `main.py` para testabilidade: `processar_pergunta()`
+
+Testar o comportamento de persistência exigiria simular o `while True` do `main()`, que depende de `input()` a cada iteração — não há como chamar isso programaticamente sem ou (a) reestruturar o código, ou (b) recorrer a `subprocess` injetando stdin, mais frágil e mais difícil de debugar.
+
+Como o estágio atual do projeto prioriza aprendizado e testabilidade sobre preservar a experiência exata de terminal (Max ainda não está na fase de virar um produto apresentável de portfólio), a decisão foi extrair o corpo do loop para uma função isolada: `processar_pergunta(pergunta, estado)`, em um novo módulo `src/processamento.py` — seguindo o mesmo padrão de separação por domínio que a Seção 14 já estabeleceu para `busca_semantica.py` e `verificacao_llm.py`.
+
+**Design da função:** recebe um dicionário `estado` mutável carregando `session`, `conversa`, `cliente`, `messages`, `tentativas_sem_contexto`, e os componentes de retrieval/LLM — em vez de dez parâmetros posicionais soltos, que precisariam viajar entre chamadas sucessivas do loop de qualquer forma. Em vez de `print()` diretamente, a função retorna um dicionário estruturado (`{'tipo': ..., 'reply': ..., 'transferiu': ..., 'motivo': ...}`); `main()` passa a apenas interpretar esse retorno e decidir o que exibir. Essa separação — decidir vs. exibir — é o que torna a função testável sem precisar capturar stdout.
+
+**Trade-off aceito, não acidental:** extrair a lógica de geração para fora do loop principal quebrou o efeito de streaming token-a-token no terminal (`llm_chat.stream()` continua sendo usado internamente para montar o texto, mas o `reply` completo só é retornado — e portanto só impresso — depois de pronto, não pedaço a pedaço). Decisão consciente, dado o estágio atual do projeto: testabilidade pesou mais que preservar a UX de terminal.
+
+**Regressão testada manualmente, ponta a ponta, antes de confiar na refatoração:** cliente novo passando pelos quatro caminhos principais (saudação, `needs_more_information`, resposta normal com contexto, `sem_contexto` → transferência na segunda tentativa) e cliente existente com histórico real (o cliente da investigação da Seção 22) confirmando que o caminho de tool calling sobreviveu à refatoração — sem `KeyError`, sem mudança de comportamento observável além da perda do streaming já esperada.
+
+### `tests/test_persistencia.py`: validação formal do timing de persistência
+
+Com `processar_pergunta()` chamável diretamente (sem `input()`), quatro casos testam o timing documentado na Seção 21 — pergunta salva antes da chamada ao LLM, resposta salva só depois de passar pelas duas checagens pós-geração:
+
+1. Resposta normal → 2 mensagens persistidas (pergunta + resposta).
+2. Transferência (`TRANSFER_HUMANO` ou `grounding_falhou` — ambos tratados como equivalentes para este teste) → 1 mensagem persistida (só a pergunta; a resposta nunca é salva quando o fluxo transfere).
+3. `sem_contexto` → 0 mensagens persistidas (a pergunta nem chega a ser salva nesse caminho, por desenho).
+4. Saudação → 0 mensagens persistidas.
+
+**Resultado: 4/4 passou na primeira execução.** O Teste 2 passou pelo caminho `transfer_humano` especificamente nesta execução — o teste aceita qualquer um dos dois motivos de transferência como válido, já que ambos resultam no mesmo comportamento de persistência (só a pergunta salva).
+
+### Regressão do eval set pós-refatoração
+
+Rodar `test_eval_set.py` de novo após a refatoração de `main.py`/`processamento.py`, mesmo sem esses arquivos serem tocados diretamente pelo eval set: **28/29 passou**, com a única falha sendo a limitação já documentada e conhecida do caso "hello" (detecção de idioma ainda não implementada, ver Seção 20). Nenhuma regressão nova introduzida pela refatoração.
+
+### `tests/debug_tool_calling_gatilho.py`: o critério real de acionamento da tool
+
+A Seção 22 tinha caracterizado o acionamento de `buscar_historico_anterior` como "mais amplo do que o inicialmente suposto", sem determinar exatamente qual é o critério — só que a hipótese original (referência sintática pendurada, tipo "sobre isso") não bastava para explicar tudo.
+
+Um script observacional (sem gabarito certo/errado — decisão do LLM não é uma regra de código para comparar contra) testou 4 categorias de pergunta, 2 perguntas por categoria, 5 repetições cada, contra o cliente com histórico real da Seção 22:
+
+| Categoria | Resultado |
+|---|---|
+| Sinal explícito de retomada ("e aí, teve alguma novidade sobre aquilo?") | 5/5 e 5/5 — sempre aciona |
+| Dado completo sem sinal de retomada ("...teve alguma novidade?" vs. "qual o prazo de entrega?") | 5/5 vs. 0/5 — resultado misto dentro da própria categoria |
+| Pergunta nova sem relação com histórico ("qual o horário de atendimento?") | 0/5 e 0/5 — nunca aciona |
+| Referência explícita a conversa anterior ("você lembra o que eu perguntei da última vez?") | 5/5 e 5/5 — sempre aciona |
+
+Cada pergunta individual se comportou de forma **perfeitamente determinística** (0/5 ou 5/5, nunca uma taxa intermediária) — o que já é, em si, uma descoberta: o acionamento da tool não é instável ou aleatório, é consistente por pergunta.
+
+O resultado misto da segunda categoria é o dado mais revelador: as duas perguntas têm dado geográfico igualmente completo (região Sul) e nenhuma das duas tem uma referência sintática pendurada tipo "sobre aquilo". A diferença real está na semântica do que está sendo pedido — "teve alguma novidade?" pede uma atualização de status ao longo do tempo, algo que só faz sentido responder considerando o que já foi dito antes; "qual o prazo de entrega?" é uma pergunta atemporal sobre política, sem noção de continuidade nenhuma.
+
+**Conclusão revisada:** o critério real de acionamento não é sintático (presença de uma referência pendurada), é semântico — a tool é chamada quando a pergunta pede, implícita ou explicitamente, uma atualização sobre algo que já pode ter acontecido, independente de como a frase está estruturada. Isso é mais sofisticado do que a hipótese original da Seção 21 previa, e também mais coerente com o propósito documentado da tool (buscar contexto quando o cliente parece estar retomando um assunto) do que um "falso positivo" — a pergunta que abriu a investigação da Seção 22 ("teve alguma novidade?") estava, sob esse critério, corretamente classificada como retomada, mesmo tendo dado completo.
+
+### Checklist final antes do merge
+
+- [x] `test_eval_set.py` — regressão do pipeline de RAG, 28/29 (1 falha conhecida, sem relação com esta branch).
+- [x] `tests/test_historico.py` — 5/5, comportamento de `buscar_historico_anterior` validado formalmente.
+- [x] `tests/test_persistencia.py` — 4/4, timing de persistência validado formalmente.
+- [x] `tests/debug_tool_calling_gatilho.py` — observação do critério real de acionamento, sem instabilidade detectada.
+- [x] Regressão manual ponta a ponta pós-refatoração (`processamento.py`), dois perfis de cliente.
+
+### Próximos passos
+
+- Cobrir persistência de mensagens para os caminhos de saudação, `needs_more_information` e intenção de saída (segue pendente desde a Seção 21 — fora do escopo desta rodada de validação, que focou em confirmar o comportamento já implementado, não em expandir cobertura).
+- Mitigação do vetor de custo do filtro de 30 dias em `buscar_historico_anterior`, quando a camada de API/deploy existir (pendente desde a Seção 21).
+- Migração real do FAISS para pgvector no Max (adiada desde a etapa de banco vetorial).
+- Merge de `experimento-memoria-tool-calling` na branch principal.
+- Próxima fase do roadmap: structured output, MCP, agents.
