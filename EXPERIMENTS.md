@@ -32,6 +32,7 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [21. Memória de conversa e tool calling: da primeira integração de banco de dados no Max à decisão de arquitetura para retomada de assunto](#21-memória-de-conversa-e-tool-calling-da-primeira-integração-de-banco-de-dados-no-max-à-decisão-de-arquitetura-para-retomada-de-assunto)
 - [22. Transferência inesperada pós-tool-calling: separando duas causas distintas e uma regra de negócio desatualizada](#22-transferência-inesperada-pós-tool-calling-separando-duas-causas-distintas-e-uma-regra-de-negócio-desatualizada)
 - [23. Validação pré-merge: refatoração para testabilidade, cobertura de persistência e o critério real de acionamento da tool](#23-validação-pré-merge-refatoração-para-testabilidade-cobertura-de-persistência-e-o-critério-real-de-acionamento-da-tool)
+- [24. Memória de sessão: resumo progressivo para conter o crescimento ilimitado de `messages`](#24-memória-de-sessão-resumo-progressivo-para-conter-o-crescimento-ilimitado-de-messages)
 
 ## 1. Por que RAG neste projeto
 
@@ -684,7 +685,7 @@ Ordenados pela sequência de cobertura planejada, não pela ordem de descoberta.
 - **Crescimento ilimitado do histórico de mensagens:** `messages` acumula toda a conversa (`HumanMessage` e `AIMessage`) sem nenhum mecanismo de limite, e a lista inteira é reenviada ao modelo a cada nova pergunta. Isso gera dois problemas reais em conversas longas: custo cumulativo crescente por mensagem (a N-ésima pergunta reenvia todas as N-1 anteriores), e risco de exceder a janela de contexto máxima do modelo, o que causaria falha na chamada. É uma limitação já ativa hoje, não apenas hipotética — mas invisível no padrão de uso atual, porque as sessões de teste realizadas até aqui nunca foram longas o suficiente para o sintoma se manifestar de forma perceptível (nem em custo, nem em erro de janela excedida).
   Duas abordagens comuns resolvem isso, cada uma com trade-off diferente: **janela de mensagens recentes** (`ConversationBufferWindowMemory` do LangChain, ou truncamento manual — mecanicamente a mesma solução, via biblioteca ou código próprio), que mantém só as últimas N mensagens sem custo de chamada adicional, mas corre o risco de descartar informação relevante mencionada fora da janela (ex.: região do cliente, dita no início de uma conversa longa); e **memória com resumo periódico**, em que uma chamada ao LLM condensa o histórico acumulado quando um limite é atingido (não a cada mensagem), preservando mais contexto relevante ao custo de uma chamada extra periódica.
   Não implementado agora: testar isso de forma significativa exigiria criar cenários de conversa longa manualmente, o que não compensa o esforço no estágio atual do projeto — mais sensato avaliar quando houver uma base de conhecimento maior e um processo de testes automatizados em vigor (eval set, e possivelmente os frameworks descritos acima), em vez de simular manualmente conversas extensas agora. Corresponde à Fase 3 do roadmap de estudos ("Memória de conversa"). Assim como as demais decisões de custo deste documento, essa é uma escolha calibrada para o volume de uso de um projeto de estudos; em produção, com conversas mais longas e recorrentes, o mesmo problema deixaria de ser tolerável e a implementação de uma das duas abordagens passaria a ser necessária, não opcional.
-> Atualização: a Seção 21 implementou memória de conversa, mas por um mecanismo diferente do descrito aqui — histórico entre sessões via `buscar_historico_anterior` (tool calling + banco de dados), não janela/resumo da lista `messages` em uso dentro de uma única sessão. O problema específico descrito neste item (crescimento ilimitado de `messages` dentro de uma sessão longa) segue em aberto, sem relação direta com a solução implementada.
+> Atualização: a Seção 21 implementou memória de conversa, mas por um mecanismo diferente do descrito aqui — histórico entre sessões via `buscar_historico_anterior` (tool calling + banco de dados), não janela/resumo da lista `messages` em uso dentro de uma única sessão. O problema específico descrito neste item (crescimento ilimitado de `messages` dentro de uma sessão longa) foi resolvido na Seção 24, via resumo progressivo combinado com janela de mensagens recentes.
 - **Detecção de mensagens fragmentadas ou incompletas:** cenário identificado na Seção 11, mas não implementado por exigir julgamento semântico (provavelmente via LLM), reintroduzindo custo de chamada por mensagem recebida.
 - **Cálculo de prazo restante personalizado (ex.: "falta 1 dia até o pedido entrar em atraso"):** identificado ao testar a nova regra de "atraso dentro do prazo" — a resposta do Max, mesmo fundamentada, é genérica ("aguarde mais um pouco"), porque o sistema não coleta nem retém dados específicos do pedido (região, data de compra) durante a conversa. Resolver isso exigiria o modelo perguntar essas informações e, mais importante, extraí-las de forma estruturada (não só texto livre) para permitir um cálculo real de data. Não implementado agora por abrir escopo novo (extração estruturada + lógica de cálculo), fora do que uma regra de conteúdo ou prompt resolveria sozinho. Fica planejado para quando `structured output` (Pydantic, JSON mode) for estudado, conforme o roadmap de estudos.
 
@@ -1341,4 +1342,54 @@ O resultado misto da segunda categoria é o dado mais revelador: as duas pergunt
 - Mitigação do vetor de custo do filtro de 30 dias em `buscar_historico_anterior`, quando a camada de API/deploy existir (pendente desde a Seção 21).
 - Migração real do FAISS para pgvector no Max (adiada desde a etapa de banco vetorial).
 - Merge de `experimento-memoria-tool-calling` na branch principal.
+- Próxima fase do roadmap: structured output, MCP, agents.
+
+## 24. Memória de sessão: resumo progressivo para conter o crescimento ilimitado de `messages`
+
+Com a branch de memória entre sessões e tool calling já mergeada (Seção 23), restava um item pendente desde a Seção 16, anterior até à existência dessa branch: a lista `estado['messages']` acumula toda `HumanMessage`/`AIMessage` da conversa atual, sem nenhum mecanismo de limite, e é reenviada inteira ao modelo a cada nova pergunta — crescendo custo e latência à medida que uma conversa se alonga, com risco de eventualmente exceder a janela de contexto do modelo.
+
+É importante não confundir esse problema com o que a Seção 21 resolveu: aquilo era memória **entre sessões** (histórico de conversas passadas, buscado sob demanda via `buscar_historico_anterior`); este é memória **dentro da sessão atual** (a lista de mensagens ativa numa única conversa em andamento). São dois problemas distintos, e só o primeiro estava resolvido antes desta seção.
+
+### Escolha de abordagem
+
+Duas técnicas mecanicamente diferentes resolvem esse tipo de problema:
+
+- **Janela deslizante**: mantém só as últimas N mensagens, descartando o resto. Sem custo de chamada adicional (é só um corte de lista), mas perde informação mencionada fora da janela.
+- **Resumo progressivo**: uma chamada extra ao LLM condensa o histórico antigo num resumo compacto, preservando continuidade semântica ao custo de uma chamada adicional por resumo gerado.
+
+A decisão foi combinar as duas — o mesmo padrão que o LangChain historicamente chamava de `ConversationSummaryBufferMemory`: manter um pequeno número de mensagens recentes intactas, e resumir tudo que passa disso. Isso evita o custo de resumir cada mensagem individualmente (barato demais para compensar em conversas curtas) e evita a perda total de contexto da janela deslizante pura.
+
+**Critério de disparo escolhido: contagem de mensagens, não contagem de tokens.** Mais simples de implementar (`len(conversa) > 10`), e considerado suficiente dado o padrão de uso esperado do Max — conversas de suporte tipicamente curtas, resolvidas ou escaladas em poucas trocas. Decisão explicitamente marcada para reavaliação futura, quando houver dados reais de clientes que permitam calibrar por token em vez de por contagem bruta (o projeto já tem `tiktoken` disponível, se for necessário).
+
+**Parâmetros escolhidos:** resumir a cada 10 mensagens (`HumanMessage`/`AIMessage`) acumuladas, mantendo as últimas 4 intactas — o suficiente para cobrir referências imediatas tipo "aquilo que eu acabei de falar", sem deixar a janela bruta grande o bastante para anular o ganho de custo do resumo.
+
+### Implementação: `src/memoria_sessao.py`
+
+Novo módulo, contendo `resumir_se_necessario(estado, llm_resumo)` — deliberadamente fora de `src/tools/`, já que não é uma ferramenta exposta ao LLM via `bind_tools` (o modelo não decide chamá-la); é lógica determinística baseada em regra, chamada diretamente por `processamento.py`, no mesmo padrão de `buscar_contexto()` ou `verificar_grounding()`.
+
+A função:
+1. Filtra `estado['messages']` para contar só `HumanMessage`/`AIMessage` (ignorando `SystemMessage` e `ToolMessage` na contagem do limiar).
+2. Se o total ainda não passou de 10, não faz nada.
+3. Caso contrário, calcula o ponto de corte andando de trás para frente na lista, contando até acumular 4 mensagens contáveis.
+4. **Proteção contra quebra de formato de API:** se o ponto de corte calculado cair exatamente sobre um `ToolMessage`, o corte é empurrado para trás (mantendo mais que 4 mensagens recentes, nunca menos) até não cair mais ali — porque a API da OpenAI exige que todo `ToolMessage` venha imediatamente após a `AIMessage(tool_calls)` correspondente na lista enviada; cortar no meio desse par quebraria a chamada.
+5. O trecho mais antigo é formatado como texto simples e enviado a uma chamada de resumo, reaproveitando `estado['llm_verificador']` (já roda em `temperature=0`, adequado para resumo determinístico, sem necessidade de um componente novo).
+6. O resumo retorna embrulhado num novo `SystemMessage` (não `HumanMessage` nem `AIMessage`, já que nenhuma das partes de fato "disse" aquele resumo — é contexto interpretativo, o mesmo papel do `system_prompt` original).
+7. `estado['messages']` é reconstruída como: `[SystemMessage original, novo SystemMessage de resumo] + mensagens recentes intactas`.
+
+A chamada foi integrada em `processamento.py` logo após a nova `HumanMessage` do cliente ser adicionada à lista, antes da decisão de tool calling — garantindo que, se o resumo disparar, o modelo já decide sobre chamar `buscar_historico_anterior` enxergando a lista já reduzida.
+
+### Validação: `tests/debug_memoria_sessao.py`
+
+Como a qualidade de um resumo gerado por LLM não tem gabarito certo/errado automatizável — precisa de leitura humana para julgar se a informação relevante foi preservada —, o script é observacional (sem `PASSOU`/`FALHOU`), montando conversas falsas inteiramente em memória (sem precisar digitar 11+ mensagens manualmente):
+
+- **Teste 1** (13 mensagens, sem tool call): confirmou que exatamente as últimas 4 mensagens ficaram intactas, e que o resumo gerado preservou os fatos relevantes (região, natureza do atraso, prazo de 48h, processo de investigação, número do pedido) de forma fiel e sem alucinação.
+- **Teste 2** (17 mensagens, com um par `AIMessage(tool_calls)` → `ToolMessage` posicionado bem no limite do corte): confirmou que a proteção contra quebra de formato funcionou como desenhado — o par ficou inteiro do lado recente, resultando em 5 mensagens recentes mantidas em vez de 4, exatamente o comportamento esperado quando o corte "puro" cairia no meio do par.
+
+Ambos os testes passaram na primeira execução, sem necessidade de ajuste no código.
+
+### Próximos passos
+
+- Reavaliar o critério de disparo (contagem de mensagens vs. contagem de tokens) quando houver volume real de uso para calibrar.
+- Cobrir persistência de mensagens para os caminhos de saudação, `needs_more_information` e intenção de saída (pendente desde a Seção 21, ainda não relacionado a este item).
+- Migração real do FAISS para pgvector no Max (adiada desde a etapa de banco vetorial).
 - Próxima fase do roadmap: structured output, MCP, agents.
