@@ -2,6 +2,7 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from busca_semantica import buscar_contexto, eh_saudacao, eh_intencao_saida
 from verificacao_llm import verificar_grounding, verificar_informacao_suficiente
+from memoria_sessao import resumir_se_necessario
 from db.models import Mensagem
 from tools import todas_as_tools
 
@@ -31,6 +32,7 @@ def processar_pergunta(pergunta, estado):
 
     mensagem_com_contexto = f'{pergunta}\n\nInformações relevantes:\n{contexto}\n\nO cliente_id do cliente atual é {estado["cliente"].id}.'
     estado['messages'].append(HumanMessage(content=mensagem_com_contexto))
+    resumir_se_necessario(estado, estado['llm_verificador'])
 
     resposta_decisao = estado['llm_chat_com_tools'].invoke(estado['messages'])
     tool_calls = resposta_decisao.tool_calls
