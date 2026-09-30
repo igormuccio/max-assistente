@@ -33,6 +33,7 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [22. Transferência inesperada pós-tool-calling: separando duas causas distintas e uma regra de negócio desatualizada](#22-transferência-inesperada-pós-tool-calling-separando-duas-causas-distintas-e-uma-regra-de-negócio-desatualizada)
 - [23. Validação pré-merge: refatoração para testabilidade, cobertura de persistência e o critério real de acionamento da tool](#23-validação-pré-merge-refatoração-para-testabilidade-cobertura-de-persistência-e-o-critério-real-de-acionamento-da-tool)
 - [24. Memória de sessão: resumo progressivo para conter o crescimento ilimitado de `messages`](#24-memória-de-sessão-resumo-progressivo-para-conter-o-crescimento-ilimitado-de-messages)
+- [25. Structured output: implementação, investigação de instabilidade e reversão](#25-structured-output-implementação-investigação-de-instabilidade-e-reversão)
 
 ## 1. Por que RAG neste projeto
 
