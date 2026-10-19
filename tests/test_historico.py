@@ -9,7 +9,7 @@ load_dotenv()
 
 from db.models import Cliente, Conversa, Mensagem
 from db.session import obter_session
-from tools.historico import buscar_historico_anterior
+from tools.historico import buscar_historico_anterior, ORCAMENTO_CARACTERES
 
 
 def criar_cliente_teste(session, email):
@@ -75,31 +75,32 @@ def teste_janela_30_dias():
     print()
 
 
-def teste_teto_150_mensagens():
-    print('--- Teste 3: teto de 150 mensagens ---')
+def teste_orcamento_caracteres():
+    print('--- Teste 3: orçamento de caracteres ---')
     with obter_session() as session:
-        cliente = criar_cliente_teste(session, f'teste_teto_{datetime.now().timestamp()}@email.com')
+        cliente = criar_cliente_teste(session, f'teste_orcamento_{datetime.now().timestamp()}@email.com')
         conversa = criar_conversa(session, cliente.id)
 
-        for i in range(155):
-            inserir_mensagem(session, conversa.id, 'cliente', f'mensagem numero {i}', datetime.now() - timedelta(minutes=155 - i))
+        for i in range(100):
+            inserir_mensagem(session, conversa.id, 'cliente', f'mensagem numero {i} ' + 'x' * 100, datetime.now() - timedelta(minutes=100 - i))
 
         cliente_id = cliente.id
 
     resultado = buscar_historico_anterior.invoke({'cliente_id': cliente_id})
     total_linhas = len([linha for linha in resultado.strip().split('\n') if linha.strip()])
 
-    print(f'Linhas retornadas: {total_linhas} (esperado: 150)')
-    print('PASSOU' if total_linhas == 150 else 'FALHOU')
+    dentro_do_orcamento = len(resultado) <= ORCAMENTO_CARACTERES
+    cortou_algo = 0 < total_linhas < 100
+    contem_mais_recente = 'mensagem numero 99 ' in resultado
+    nao_contem_mais_antiga = 'mensagem numero 0 ' not in resultado
 
-    contem_mais_antigas = 'mensagem numero 0' in resultado
-    contem_borda_inferior = 'mensagem numero 5' in resultado
-    contem_mais_recente = 'mensagem numero 154' in resultado
-
-    print(f'NÃO contém a mais antiga (numero 0, deveria ter sido cortada): {not contem_mais_antigas}')
-    print(f'Contém a borda inferior do corte (numero 5): {contem_borda_inferior}')
-    print(f'Contém a mais recente (numero 154): {contem_mais_recente}')
-    print('PASSOU' if (not contem_mais_antigas and contem_borda_inferior and contem_mais_recente) else 'FALHOU')
+    print(f'Caracteres retornados: {len(resultado)} (orçamento: {ORCAMENTO_CARACTERES})')
+    print(f'Linhas retornadas: {total_linhas} (de 100 inseridas)')
+    print(f'Dentro do orçamento: {dentro_do_orcamento}')
+    print(f'Cortou parte das mensagens: {cortou_algo}')
+    print(f'Contém a mais recente (numero 99): {contem_mais_recente}')
+    print(f'NÃO contém a mais antiga (numero 0): {nao_contem_mais_antiga}')
+    print('PASSOU' if (dentro_do_orcamento and cortou_algo and contem_mais_recente and nao_contem_mais_antiga) else 'FALHOU')
     print()
 
 
@@ -155,6 +156,6 @@ def teste_ordem_cronologica():
 if __name__ == '__main__':
     teste_sem_historico()
     teste_janela_30_dias()
-    teste_teto_150_mensagens()
+    teste_orcamento_caracteres()
     teste_multiplas_conversas()
     teste_ordem_cronologica()
