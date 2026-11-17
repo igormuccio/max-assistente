@@ -34,7 +34,7 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [23. Validação pré-merge: refatoração para testabilidade, cobertura de persistência e o critério real de acionamento da tool](#23-validação-pré-merge-refatoração-para-testabilidade-cobertura-de-persistência-e-o-critério-real-de-acionamento-da-tool)
 - [24. Memória de sessão: resumo progressivo para conter o crescimento ilimitado de `messages`](#24-memória-de-sessão-resumo-progressivo-para-conter-o-crescimento-ilimitado-de-messages)
 - [25. Structured output: implementação, investigação de instabilidade e reversão](#25-structured-output-implementação-investigação-de-instabilidade-e-reversão)
-- [26. MCP: experimento isolado, decisão de não adotar e decisão de design futura para o histórico entre sessões](#26-mcp-experimento-isolado-decisão-de-não-adotar-e-decisão-de-design-futura-para-o-histórico-entre-sessões)
+- [26. MCP: experimento isolado, decisão de não adotar e orçamento de caracteres para o histórico entre sessões](#26-mcp-experimento-isolado-decisão-de-não-adotar-e-orçamento-de-caracteres-para-o-histórico-entre-sessões)
 
 ## 1. Por que RAG neste projeto
 
@@ -1200,7 +1200,7 @@ O retorno da função é montado inteiramente em Python (loop e f-strings sobre 
 
 **Limitação conhecida, documentada e não resolvida nesta etapa:** o filtro por janela de tempo é, por natureza, um vetor de abuso de custo. Um cliente malicioso poderia gerar um volume alto de mensagens baratas (busca semântica de saudação/saída, não geração completa) para inflar deliberadamente o histórico trazido por `buscar_historico_anterior`, encarecendo chamadas futuras de geração sempre que a ferramenta fosse acionada. A mitigação real (rate limiting, limite de tamanho por mensagem) depende de uma camada de API/deploy ainda não implementada no roadmap — fica registrada como pendência a revisar quando essa camada existir, não resolvida agora.
 
-> Atualização: o teto de 150 mensagens descrito acima foi revisitado na Seção 26.8, que registra como decisão de design futura a troca do critério principal por um orçamento de caracteres (mais recente para mais antigo), mantendo o teto de 150 como segunda proteção. Ainda não implementado na `main`.
+> Atualização: o teto de 150 mensagens descrito acima foi revisitado na Seção 26.8, que trocou o critério principal por um orçamento de caracteres (6000, provisório), somado da mensagem mais recente para a mais antiga, mantendo o teto de 150 como segunda proteção. Implementado na `main`.
 
 ### Identificação de cliente e persistência de mensagens
 
@@ -1221,7 +1221,7 @@ Com a integração completa, o fluxo foi testado de ponta a ponta contra o `max_
 ### Próximos passos
 
 - Cobrir persistência de mensagens para os caminhos de saudação, pedido de mais informação e intenção de saída (hoje fora do escopo implementado).
-- Mitigação do vetor de custo do filtro de 30 dias em `buscar_historico_anterior`, quando a camada de API/deploy existir.
+- Mitigação do vetor de custo do filtro de 30 dias em `buscar_historico_anterior`, quando a camada de API/deploy existir. Parcialmente mitigado pelo orçamento de caracteres (Seção 26.8); limite por mensagem individual e rate limiting seguem pendentes.
 - Migração real do FAISS para pgvector no Max (adiada desde a etapa de banco vetorial, para evitar retrabalho até este bloco de memória/tool calling estar concluído).
 - Próxima fase do roadmap: structured output, MCP, agents.
 > Atualização: `structured output` revertido (Seção 25); MCP e agents avaliados e não adotados (Seção 26). A próxima fase passa a ser deploy.
@@ -1284,7 +1284,7 @@ Cinco casos, testando a função diretamente via `.invoke({'cliente_id': ...})` 
 
 1. Cliente sem histórico algum → retorna a string de fallback esperada.
 2. Janela de 30 dias → mensagem com 29 dias aparece, mensagem com 31 dias não aparece.
-3. Teto de 150 mensagens → de 155 mensagens inseridas, exatamente as 150 mais recentes retornam; a mais antiga (índice 0) está ausente, a borda do corte (índice 5) está presente, a mais recente (índice 154) está presente. Testar a borda, não só os extremos, confirma que o corte acontece exatamente em 150, não "em algum lugar perto disso". *(Atualização: a Seção 26.8 planeja substituir este teste por um teste de orçamento de caracteres quando a decisão de design for implementada na `main`.)*
+3. Teto de 150 mensagens → de 155 mensagens inseridas, exatamente as 150 mais recentes retornam; a mais antiga (índice 0) está ausente, a borda do corte (índice 5) está presente, a mais recente (índice 154) está presente. Testar a borda, não só os extremos, confirma que o corte acontece exatamente em 150, não "em algum lugar perto disso". *(Atualização: este teste foi substituído, na Seção 26.8, por um teste de orçamento de caracteres.)*
 4. Múltiplas conversas do mesmo cliente → o filtro é por `Conversa.cliente_id` via `join`, não por uma `conversa_id` isolada; mensagens de uma conversa antiga aparecem numa consulta feita a partir de uma conversa nova.
 5. Ordem cronológica → mensagens retornam na ordem em que aconteceram, não na ordem inversa da query (`.desc()` seguido de `.reverse()` no código).
 
@@ -1466,9 +1466,9 @@ A base de código descrita aqui (schema, funções de cálculo, integração) é
 - Próxima fase do roadmap: MCP, agents. (`structured output` foi tentado e revertido — Seção 25; retomar a ideia de base, se fizer sentido no futuro, exige primeiro resolver a instabilidade documentada lá.)
 > Atualização: MCP foi testado em branch isolada e não será adotado no Max (Seção 26); agents foi avaliado conceitualmente e também não se encaixa no fluxo central. A próxima fase do roadmap passa a ser deploy.
 
-## 26. MCP: experimento isolado, decisão de não adotar e decisão de design futura para o histórico entre sessões
+## 26. MCP: experimento isolado, decisão de não adotar e orçamento de caracteres para o histórico entre sessões
 
-Com o bloco de memória e tool calling concluído (Seções 21-24) e `structured output` revertido (Seção 25), o próximo item do roadmap era MCP. A pergunta do experimento: **o MCP traria algum ganho para o Max?** O trabalho foi feito na branch `experimento-mcp`, sem tocar no pipeline principal; o que foi decidido a partir dele (decisão de design) está nesta seção, e o código de teste fica na branch como evidência (esta seção descreve o que foi feito lá; os arquivos citados existem apenas nessa branch, não na `main`).
+Com o bloco de memória e tool calling concluído (Seções 21-24) e `structured output` revertido (Seção 25), o próximo item do roadmap era MCP. A pergunta do experimento: **o MCP traria algum ganho para o Max?** O trabalho foi feito na branch `experimento-mcp`, sem tocar no pipeline principal; a decisão de design que saiu dele (o orçamento de caracteres do histórico, Seção 26.8) foi implementada depois na `main` e está registrada nesta seção, e o código de teste fica na branch como evidência (esta seção descreve o que foi feito lá; os arquivos citados existem apenas nessa branch, não na `main`).
 
 ### 26.1 O que o MCP muda e o que não muda
 
@@ -1531,9 +1531,9 @@ Decisões de design registradas, **não implementadas**:
 
 Agent é um LLM em laço decidindo a ordem dos passos; o Max é um workflow, com a sequência definida em código (saída, saudação, informação suficiente, RAG, geração, grounding). Essa ordem fixa carrega garantias que um agent tornaria probabilísticas: a pergunta é salva antes do LLM e a resposta só depois das duas checagens, e a transferência é decidida por código. Cada volta do laço também é mais uma chamada de LLM, e a Seção 25 já mostrou evidência de que o volume de chamadas por turno se correlaciona com a instabilidade. Um agent só faria sentido como um passo isolado dentro do workflow, para uma tarefa aberta, ou em um projeto separado.
 
-### 26.8 Decisão de design futura: orçamento de caracteres no histórico entre sessões
+### 26.8 Orçamento de caracteres no histórico entre sessões
 
-Status: validado na branch `experimento-mcp` (commit `0438a4a`), **não implementado na `main`**. Fica registrado como decisão de design a implementar depois.
+Status: validado na branch `experimento-mcp` (commit `0438a4a`) e **implementado na `main`** em seguida, sem a separação em `consultar_historico()`, que nasceu do MCP.
 
 Ao rodar o servidor MCP contra o banco, o teto de 150 mensagens de `buscar_historico_anterior` (Seção 21) foi revisitado. Ele não havia sido uma decisão explícita: a decisão real foi a janela de 30 dias, com um teto apenas como proteção contra volume patológico, e o número 150 entrou na implementação sem ser questionado.
 
@@ -1567,10 +1567,16 @@ Pontos de design:
 
 **Validação na branch:** o teste do teto de 150 (Teste 3 de `test_historico.py`) foi substituído por um teste de orçamento: 100 mensagens longas inseridas, 41 retornadas, 5863 caracteres contra um orçamento de 6000, com a mais recente presente e a mais antiga ausente. Os outros quatro testes seguiram passando. Efeito colateral: o teto de 150 mensagens deixou de ser exercitado por teste, já que dificilmente é o limite que dispara.
 
-**Alterações previstas no código quando for implementado na `main`:**
+**Alterações aplicadas na `main`:**
 
-- `src/tools/historico.py`: duas constantes no topo (`LIMITE_MENSAGENS = 150`, `ORCAMENTO_CARACTERES = 6000`); o `.limit()` passa a ler `LIMITE_MENSAGENS`; o `.reverse()` da lista de mensagens é removido; o laço de montagem do texto é substituído pelo trecho acima, seguido de `linhas.reverse()` e `"".join(linhas)`. A separação em `consultar_historico()` feita na branch não é necessária, porque nasceu do MCP.
-- `tests/test_historico.py`: importar `ORCAMENTO_CARACTERES`; substituir o teste do teto de 150 por um teste de orçamento de caracteres; atualizar a chamada no bloco final.
+- `src/tools/historico.py`: duas constantes no topo (`LIMITE_MENSAGENS = 150`, `ORCAMENTO_CARACTERES = 6000`); o `.limit()` passa a ler `LIMITE_MENSAGENS`; o `.reverse()` logo após a consulta foi removido; o laço de montagem do texto foi substituído pelo trecho acima, seguido de `linhas.reverse()` e `"".join(linhas)`. A separação em `consultar_historico()` feita na branch não foi levada para a `main`, porque nasceu do MCP.
+- `tests/test_historico.py`: importa `ORCAMENTO_CARACTERES`; o teste do teto de 150 deu lugar a `teste_orcamento_caracteres`, com 100 mensagens do remetente `max`, cada uma com `mensagem numero N` mais 300 caracteres de preenchimento. O teste confere quatro coisas: `len(resultado) <= ORCAMENTO_CARACTERES`, corte feito (menos linhas que o total), mais recente presente e mais antiga ausente. O espaço depois do número (`'mensagem numero 0 '`) delimita o número no texto. A chamada no bloco final foi atualizada.
+
+**Resultado na `main`:** os 5 testes passaram. No Teste 3, as 100 mensagens inseridas viraram 17 linhas e 5763 caracteres, ou 339 por linha. A 18ª linha levaria o total a 6102, acima de 6000, e o laço parou ali.
+
+**Como estimar quantas linhas cabem:** o orçamento é gasto por linha formatada, não só pelo conteúdo. Cada linha custa o conteúdo mais o prefixo de data `[dd/mm HH:MM] ` (14 caracteres), o remetente (`max: ` com 5, `cliente: ` com 9) e a quebra de linha (1). Com as médias medidas na tabela acima, uma linha do Max custa cerca de 289 caracteres e uma do cliente cerca de 54, então um histórico alternado tem em média cerca de 171 por linha, ou cerca de 35 linhas em 6000. A medição real na branch (41 linhas, 5863 caracteres, 143 por linha) ficou abaixo da média estimada, o que é plausível porque as médias escondem a variação. A estimativa serve como checagem de sanidade do que o teste imprime, não como parâmetro de calibragem.
+
+**Consequência para o teto de 150:** com o prefixo, até mensagens só do cliente custam cerca de 54 caracteres por linha, e 150 delas somariam cerca de 8100, então o orçamento corta em torno de 110 linhas, antes do teto. O teto só cortaria primeiro se as linhas tivessem menos de 40 caracteres, o que o prefixo (20 a 24 caracteres) quase impede. Ele permanece como proteção redundante contra casos anômalos, e não como um critério que se verá atuar em uso normal.
 
 **Pendências:** o valor de 6000 é **provisório, sem calibragem**; contar tokens reais com `tiktoken` (já instalado no ambiente) e conversas de clientes reais refinaria o número. O orçamento limita o tamanho total do histórico injetado e mitiga parcialmente o vetor de custo documentado na Seção 21, mas não limita o tamanho de uma mensagem individual nem substitui rate limiting na camada de API.
 
@@ -1582,7 +1588,7 @@ Pontos de design:
 
 ### Próximos passos
 
-- Implementar na `main` o orçamento de caracteres do histórico, conforme a decisão de design da Seção 26.8, e calibrar o valor com dados reais.
+- Calibrar o orçamento de caracteres do histórico (6000, provisório) com `tiktoken` e dados de clientes reais, já que o custo que importa é em tokens.
 - Calibrar os timeouts, caso o MCP venha a ser adotado, com dados reais, na etapa de observabilidade.
 - Limite por mensagem individual: depende da camada de API (Seção 21).
 - Os servidores falsos usados no teste de travamento (`tests/test_servidor_falso_*.py`) dormem por uma hora ao serem executados; quando entrar a etapa de testes automatizados (`pytest`), precisam ser excluídos da descoberta de testes.

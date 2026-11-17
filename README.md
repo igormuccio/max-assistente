@@ -7,7 +7,7 @@
 
 Projeto desenvolvido para estudo de aplicações de IA utilizando Large Language Models (LLMs), Prompt Engineering e Retrieval-Augmented Generation (RAG).
 
-Assistente de atendimento ao cliente que responde com base nas políticas reais da empresa, transfere automaticamente para atendentes humanos quando necessário, mantém contexto durante a conversa e consulta o histórico recente do cliente quando ele retoma um assunto de uma sessão anterior.
+Assistente de atendimento ao cliente que responde com base nas políticas reais da empresa, transfere automaticamente para atendentes humanos quando necessário e mantém contexto durante a conversa e consulta o histórico recente do cliente quando ele retoma um assunto de uma sessão anterior.
 
 > Além do código-fonte, este projeto documenta os experimentos realizados durante o desenvolvimento — incluindo falhas, hipóteses testadas e decisões arquiteturais recalibradas com dado real. Veja [EXPERIMENTS.md](./EXPERIMENTS.md).
 
@@ -124,9 +124,9 @@ Quando contexto relevante é encontrado, ele é inserido no prompt enviado ao GP
 
 O índice vetorial e os documentos-pai são persistidos em disco e só são recalculados quando a base de conhecimento (`politicas_xyz.pdf`) é alterada, evitando reprocessamento desnecessário a cada execução.
 
-Durante a sessão, o histórico é mantido em memória e resumido automaticamente quando cresce, para que o contexto da conversa não aumente sem limite. As interações que chegam à geração ou à transferência são gravadas em PostgreSQL (tabelas de clientes, conversas e mensagens, via SQLAlchemy).
+Durante a sessão, o histórico é mantido em memória e resumido automaticamente quando cresce (resumo progressivo combinado com uma janela das mensagens mais recentes), para que o contexto da conversa não aumente sem limite. As interações que chegam à geração ou à transferência são gravadas em PostgreSQL (tabelas de clientes, conversas e mensagens, via SQLAlchemy).
 
-Quando o cliente retoma um assunto de uma conversa anterior ("e como ficou meu problema?"), o modelo aciona, via tool calling, a tool `buscar_historico_anterior`. Ela lê as mensagens do cliente nos últimos 30 dias, de todas as conversas, e as devolve em ordem cronológica. O limite principal é um orçamento de caracteres (6000, valor provisório), somado da mensagem mais recente para a mais antiga: a mais recente sempre entra, e o corte acontece na primeira que não couber. Um teto de 150 mensagens funciona como segunda proteção. O orçamento foi escolhido porque, nos dados medidos, as respostas do Max são muito mais longas que as mensagens do cliente (média de 269 contra 30 caracteres), então contar mensagens escondia o custo real.
+Quando o cliente retoma um assunto de uma conversa anterior ("e como ficou meu problema?"), o modelo aciona, via tool calling, a tool `buscar_historico_anterior`. Ela lê as mensagens do cliente nos últimos 30 dias, de todas as conversas, e as devolve em ordem cronológica. O limite principal é um orçamento de caracteres (6000, valor provisório), somado da mensagem mais recente para a mais antiga: a mais recente sempre entra, e o corte acontece na primeira linha que não couber. Um teto de 150 mensagens funciona como segunda proteção. O orçamento foi escolhido porque, nos dados medidos, as respostas do Max são muito mais longas que as mensagens do cliente (média de 269 contra 30 caracteres), então contar mensagens escondia o custo real.
 
 Um eval set automatizado (`tests/`), com 30 casos, roda um conjunto de perguntas de teste contra o pipeline completo — saudação, recuperação de contexto, necessidade de informação adicional e grounding — usado para validar que mudanças no prompt, no chunking ou nos parâmetros de retrieval não introduzem regressões em comportamentos já calibrados. Além de testar cada etapa isoladamente, dois tipos de check validam propriedades do fluxo real de decisão: um confirma em qual etapa exata do pipeline uma pergunta é interceptada (garantindo, por exemplo, que uma pergunta ambígua entre nacional e internacional é barrada antes de chegar ao retriever, e não só que a função isolada retorna o valor certo); outro confirma qual política de negócio foi de fato aplicada na resposta final, não apenas que a resposta está "fundamentada" em algum contexto — uma resposta pode citar a política errada entre duas candidatas e ainda passar numa checagem de grounding ingênua. O eval set não exercita tool calling: a tool de histórico e a persistência têm testes próprios (`test_historico.py` e `test_persistencia.py`).
 
@@ -156,7 +156,7 @@ Um eval set automatizado (`tests/`), com 30 casos, roda um conjunto de perguntas
 - OpenAI API (GPT-4o Mini), incluindo tool calling
 - OpenAI Embeddings
 - FAISS (banco de vetores)
-- PostgreSQL e SQLAlchemy (persistência de clientes, conversas e mensagens)
+- PostgreSQL, SQLAlchemy e psycopg2 (persistência de clientes, conversas e mensagens)
 - pdfplumber (extração estrutural de PDF)
 - python-dotenv
 
@@ -217,21 +217,29 @@ source .venv/bin/activate   # Linux/Mac
 pip install -r requirements.txt
 ```
 
-4. Configure as variáveis de ambiente
+4. Prepare o PostgreSQL
+
+O Max grava clientes, conversas e mensagens em um banco PostgreSQL chamado `max_db`, com as tabelas `clientes`, `conversas` e `mensagens` (estrutura espelhada em `src/db/models.py`). Crie o banco e as tabelas antes de rodar.
+
+5. Configure as variáveis de ambiente
 ```bash
 cp .env.example .env
-# Adicione sua OPENAI_API_KEY no arquivo .env
+# Adicione sua OPENAI_API_KEY e a senha do banco (DB_PASSWORD) no arquivo .env
 ```
 
-5. Execute o programa
+6. Execute o programa
 ```bash
 python src/main.py
 ```
 
-6. (Opcional) Rode o eval set
+7. (Opcional) Rode os testes
 ```bash
 python tests/test_eval_set.py
+python tests/test_historico.py
+python tests/test_persistencia.py
 ```
+
+Os testes de histórico e de persistência usam o banco real e deixam clientes de teste acumulando no `max_db`.
 
 ## O que este projeto explora
 
@@ -257,7 +265,7 @@ Cada uma dessas decisões foi testada empiricamente, não apenas assumida — in
 - Detecção de mensagens fragmentadas ou incompletas (cliente digitando em várias mensagens curtas em sequência) — adiada por ora; não builda em cima de nenhuma outra etapa do pipeline, então fica reservada para quando o projeto migrar de configuração de estudo para uma configuração voltada a apresentação
 - Persistência das interações que hoje não são gravadas (saudação, pedido de mais informação e intenção de saída), para o histórico entre sessões ficar completo
 - Calibração do orçamento de histórico em tokens (tiktoken) com dados reais, no lugar do valor provisório de 6000 caracteres
-- Migração do índice vetorial de FAISS para pgvector — adiada; a decisão depende do ambiente de hospedagem e exigiria recalibrar o `score_threshold` e rodar o eval set novamente
+- Migração do índice vetorial de FAISS para pgvector, a ser tratada após o deploy — exigiria recalibrar o `score_threshold` e rodar o eval set novamente
 - Interface Web com Streamlit, com hospedagem gratuita no Streamlit Community Cloud
 - API REST utilizando FastAPI — a decisão entre uma API separada ou tudo no Streamlit será tomada na abertura da fase de deploy
 - Docker para facilitar o deploy
