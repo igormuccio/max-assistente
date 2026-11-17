@@ -7,7 +7,7 @@
 
 Projeto desenvolvido para estudo de aplicações de IA utilizando Large Language Models (LLMs), Prompt Engineering e Retrieval-Augmented Generation (RAG).
 
-Assistente de atendimento ao cliente que responde com base nas políticas reais da empresa, transfere automaticamente para atendentes humanos quando necessário e mantém contexto durante a conversa e consulta o histórico recente do cliente quando ele retoma um assunto de uma sessão anterior.
+Assistente de atendimento ao cliente que responde com base nas políticas reais da empresa, transfere automaticamente para atendentes humanos quando necessário, mantém contexto durante a conversa e consulta o histórico recente do cliente quando ele retoma um assunto de uma sessão anterior.
 
 > Além do código-fonte, este projeto documenta os experimentos realizados durante o desenvolvimento — incluindo falhas, hipóteses testadas e decisões arquiteturais recalibradas com dado real. Veja [EXPERIMENTS.md](./EXPERIMENTS.md).
 
@@ -93,7 +93,8 @@ flowchart TD
     PrimeiraTentativa -->|Sim| Usuario
     PrimeiraTentativa -->|Não| Transferencia[Transferência para atendente]
 
-    ContextoEncontrado -->|Sim| LLM[LLM]
+    ContextoEncontrado -->|Sim| GravaPergunta[Grava pergunta do cliente]
+    GravaPergunta --> LLM[LLM]
     LLM -.->|cliente retoma assunto anterior| Historico[Tool: histórico do cliente]
     Historico -.-> BancoDados[(PostgreSQL)]
     LLM --> MarcadorTransferencia{Contém marcador de transferência?}
@@ -105,14 +106,14 @@ flowchart TD
     RespostaFundamentada -->|Sim| RespostaExibida[Resposta exibida ao usuário]
     RespostaExibida --> Usuario
 
-    RespostaExibida --> Grava[Grava pergunta e resposta]
-    Transferencia --> Grava
-    Grava --> BancoDados
+    GravaPergunta --> BancoDados
+    RespostaExibida --> GravaResposta[Grava resposta do Max]
+    GravaResposta --> BancoDados
 ```
 
 ## Como funciona
 
-Antes de qualquer busca, o Max verifica se a mensagem é uma saudação — usando o mesmo mecanismo de embedding do RAG, mas contra uma base pequena de exemplos, sem gastar chamada ao modelo de linguagem para isso.
+Antes de qualquer busca, o Max verifica se a mensagem é uma intenção de saída ou uma saudação — usando o mesmo mecanismo de embedding do RAG, mas contra bases pequenas de exemplos, sem gastar chamada ao modelo de linguagem para isso.
 
 Em seguida, uma chamada ao LLM verifica se a pergunta já contém as informações necessárias para determinar qual regra se aplica. O dado que falta depende do assunto perguntado, não é uma regra única: para prazo de entrega, a empresa distingue entre pedido nacional e dois destinos internacionais em fase piloto (Portugal e Estados Unidos), cada um com prazo próprio; para extravio, a regra muda apenas entre nacional e internacional, o procedimento é o mesmo para os dois países cobertos. Perguntas que dependem de um dado ainda não informado — região, país de destino ou prazo — recebem um pedido de mais detalhes antes de qualquer busca, evitando gastar uma chamada de geração e uma busca vetorial em uma pergunta que já se sabe estar incompleta.
 
@@ -124,16 +125,16 @@ Quando contexto relevante é encontrado, ele é inserido no prompt enviado ao GP
 
 O índice vetorial e os documentos-pai são persistidos em disco e só são recalculados quando a base de conhecimento (`politicas_xyz.pdf`) é alterada, evitando reprocessamento desnecessário a cada execução.
 
-Durante a sessão, o histórico é mantido em memória e resumido automaticamente quando cresce (resumo progressivo combinado com uma janela das mensagens mais recentes), para que o contexto da conversa não aumente sem limite. As interações que chegam à geração ou à transferência são gravadas em PostgreSQL (tabelas de clientes, conversas e mensagens, via SQLAlchemy).
+Durante a sessão, o histórico é mantido em memória e resumido automaticamente quando cresce (resumo progressivo combinado com uma janela das mensagens mais recentes), para que o contexto da conversa não aumente sem limite. A pergunta do cliente é gravada em PostgreSQL (tabelas de clientes, conversas e mensagens, via SQLAlchemy) assim que o contexto relevante é encontrado, antes da chamada ao modelo; a resposta do Max só é gravada depois de passar pelas duas checagens (marcador de transferência e grounding). Em uma transferência, portanto, só a pergunta fica registrada. Saudação, pedido de mais informação, intenção de saída e perguntas sem contexto não são gravados hoje.
 
-Quando o cliente retoma um assunto de uma conversa anterior ("e como ficou meu problema?"), o modelo aciona, via tool calling, a tool `buscar_historico_anterior`. Ela lê as mensagens do cliente nos últimos 30 dias, de todas as conversas, e as devolve em ordem cronológica. O limite principal é um orçamento de caracteres (6000, valor provisório), somado da mensagem mais recente para a mais antiga: a mais recente sempre entra, e o corte acontece na primeira linha que não couber. Um teto de 150 mensagens funciona como segunda proteção. O orçamento foi escolhido porque, nos dados medidos, as respostas do Max são muito mais longas que as mensagens do cliente (média de 269 contra 30 caracteres), então contar mensagens escondia o custo real.
+Quando o cliente retoma um assunto de uma conversa anterior ("e como ficou meu problema?"), o modelo aciona, via tool calling, a tool `buscar_historico_anterior`. Ela lê as mensagens do cliente e as respostas do Max, de todas as conversas desse cliente nos últimos 30 dias, e as devolve em ordem cronológica. O limite principal é um orçamento de caracteres (6000, valor provisório), somado da mensagem mais recente para a mais antiga: a mais recente sempre entra, e o corte acontece na primeira linha que não couber. Um teto de 150 mensagens funciona como segunda proteção. O orçamento foi escolhido porque, nos dados medidos, as respostas do Max são muito mais longas que as mensagens do cliente (média de 269 contra 30 caracteres), então contar mensagens escondia o custo real.
 
 Um eval set automatizado (`tests/`), com 30 casos, roda um conjunto de perguntas de teste contra o pipeline completo — saudação, recuperação de contexto, necessidade de informação adicional e grounding — usado para validar que mudanças no prompt, no chunking ou nos parâmetros de retrieval não introduzem regressões em comportamentos já calibrados. Além de testar cada etapa isoladamente, dois tipos de check validam propriedades do fluxo real de decisão: um confirma em qual etapa exata do pipeline uma pergunta é interceptada (garantindo, por exemplo, que uma pergunta ambígua entre nacional e internacional é barrada antes de chegar ao retriever, e não só que a função isolada retorna o valor certo); outro confirma qual política de negócio foi de fato aplicada na resposta final, não apenas que a resposta está "fundamentada" em algum contexto — uma resposta pode citar a política errada entre duas candidatas e ainda passar numa checagem de grounding ingênua. O eval set não exercita tool calling: a tool de histórico e a persistência têm testes próprios (`test_historico.py` e `test_persistencia.py`).
 
 ## Funcionalidades
 
 - Atendimento automatizado sobre problemas de entrega
-- Detecção de saudação via embedding, sem custo de chamada ao modelo
+- Detecção de saudação e de intenção de saída via embedding, sem custo de chamada ao modelo
 - Verificação de informação suficiente antes da busca, evitando retrieval desnecessário em perguntas incompletas — com granularidade por assunto (prazo internacional exige o país específico; extravio internacional exige apenas saber que é internacional, já que a regra é igual para os destinos cobertos)
 - Respostas baseadas nas políticas da empresa via RAG, com limiar de relevância calibrado com dado real
 - Extração estrutural de PDF via metadados de fonte, reconstruindo a hierarquia do documento sem valores hardcoded
@@ -143,7 +144,6 @@ Um eval set automatizado (`tests/`), com 30 casos, roda um conjunto de perguntas
 - Transferência automática para atendente humano quando necessário
 - Persistência do índice vetorial e dos documentos-pai em disco, recalculados apenas quando a base muda
 - Eval set automatizado (30 casos) para validar regressões após mudanças de prompt, chunking ou verificação — incluindo checagem da ordem real de interceptação do pipeline e da política de negócio de fato aplicada na resposta
-- Streaming de respostas em tempo real
 - Memória de sessão com resumo automático do histórico quando a conversa cresce
 - Persistência de conversas e mensagens em PostgreSQL
 - Consulta ao histórico do cliente entre sessões via tool calling, com janela de 30 dias e orçamento de caracteres
@@ -181,8 +181,12 @@ max-assistente/
 │   ├── busca_semantica.py       # Busca de contexto e detecção de saudação por embedding
 │   ├── verificacao_llm.py       # Verificação de informação suficiente e de grounding
 │   ├── memoria_sessao.py        # Memória da sessão e resumo automático
-│   ├── db/                      # Modelos e sessão do banco (SQLAlchemy)
+│   ├── db/
+│   │   ├── models.py            # Modelos SQLAlchemy (Cliente, Conversa, Mensagem)
+│   │   ├── schema.sql           # Script de criação das tabelas (com os CHECK constraints)
+│   │   └── session.py           # Conexão com o PostgreSQL e obter_session()
 │   └── tools/
+│       ├── __init__.py          # Exporta a lista todas_as_tools
 │       └── historico.py         # Tool de histórico entre sessões (buscar_historico_anterior)
 ├── tests/
 │   ├── eval_set.json             # Casos de teste do eval set automatizado
@@ -219,12 +223,16 @@ pip install -r requirements.txt
 
 4. Prepare o PostgreSQL
 
-O Max grava clientes, conversas e mensagens em um banco PostgreSQL chamado `max_db`, com as tabelas `clientes`, `conversas` e `mensagens` (estrutura espelhada em `src/db/models.py`). Crie o banco e as tabelas antes de rodar.
+O Max grava clientes, conversas e mensagens em um banco PostgreSQL chamado `max_db`. A conexão usa o usuário `postgres` em `localhost:5432` (definida em `src/db/session.py`). Crie o banco e as tabelas a partir do script do projeto:
+```bash
+psql -U postgres -h localhost -c "CREATE DATABASE max_db;"
+psql -U postgres -h localhost -d max_db -f src/db/schema.sql
+```
 
 5. Configure as variáveis de ambiente
 ```bash
 cp .env.example .env
-# Adicione sua OPENAI_API_KEY e a senha do banco (DB_PASSWORD) no arquivo .env
+# Preencha OPENAI_API_KEY e DB_PASSWORD (senha do usuário postgres) no arquivo .env
 ```
 
 6. Execute o programa
@@ -261,9 +269,8 @@ Cada uma dessas decisões foi testada empiricamente, não apenas assumida — in
 ## Melhorias futuras
 
 - Ampliar o eval set com mais variações de pergunta (específica, difusa, fora do domínio) — crescimento orgânico conforme novos casos surgirem em teste, não um lote isolado
-- Few-shot prompting sistemático nos prompts de geração e verificação, escolhendo exemplos representativos a partir do eval set completo
 - Detecção de mensagens fragmentadas ou incompletas (cliente digitando em várias mensagens curtas em sequência) — adiada por ora; não builda em cima de nenhuma outra etapa do pipeline, então fica reservada para quando o projeto migrar de configuração de estudo para uma configuração voltada a apresentação
-- Persistência das interações que hoje não são gravadas (saudação, pedido de mais informação e intenção de saída), para o histórico entre sessões ficar completo
+- Persistência das interações que hoje não são gravadas (saudação, pedido de mais informação, intenção de saída e perguntas sem contexto), para o histórico entre sessões ficar completo
 - Calibração do orçamento de histórico em tokens (tiktoken) com dados reais, no lugar do valor provisório de 6000 caracteres
 - Migração do índice vetorial de FAISS para pgvector, a ser tratada após o deploy — exigiria recalibrar o `score_threshold` e rodar o eval set novamente
 - Interface Web com Streamlit, com hospedagem gratuita no Streamlit Community Cloud
