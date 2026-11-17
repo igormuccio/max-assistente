@@ -34,6 +34,7 @@ Este documento registra uma investigação prática sobre os parâmetros centrai
 - [23. Validação pré-merge: refatoração para testabilidade, cobertura de persistência e o critério real de acionamento da tool](#23-validação-pré-merge-refatoração-para-testabilidade-cobertura-de-persistência-e-o-critério-real-de-acionamento-da-tool)
 - [24. Memória de sessão: resumo progressivo para conter o crescimento ilimitado de `messages`](#24-memória-de-sessão-resumo-progressivo-para-conter-o-crescimento-ilimitado-de-messages)
 - [25. Structured output: implementação, investigação de instabilidade e reversão](#25-structured-output-implementação-investigação-de-instabilidade-e-reversão)
+- [26. MCP: experimento isolado, decisão de não adotar e decisão de design futura para o histórico entre sessões](#26-mcp-experimento-isolado-decisão-de-não-adotar-e-decisão-de-design-futura-para-o-histórico-entre-sessões)
 
 ## 1. Por que RAG neste projeto
 
@@ -575,7 +576,7 @@ O campo `limitacao_conhecida` distingue uma falha aceita conscientemente (docume
 
 ### 13.2 Script de execução
 
-`tests/run_evals.py` carrega o JSON, inicializa os mesmos componentes usados em produção (`retriever`, `llm_chat`, `llm_verificador`, `system_prompt`) e despacha cada caso para uma função avaliadora correspondente ao seu tipo de `check`, via um dicionário de despacho:
+`tests/test_eval_set.py` carrega o JSON, inicializa os mesmos componentes usados em produção (`retriever`, `llm_chat`, `llm_verificador`, `system_prompt`) e despacha cada caso para uma função avaliadora correspondente ao seu tipo de `check`, via um dicionário de despacho:
 
 ```python
 AVALIADORES = {
@@ -679,7 +680,7 @@ Com a adição de persistência, grounding verification e detecção de saudaç�
 Ordenados pela sequência de cobertura planejada, não pela ordem de descoberta.
 
 - **Frameworks de avaliação automatizada (evolução do eval set manual):** ferramentas como Promptfoo, DeepEval e RAGAS geram e avaliam casos de teste em maior escala — incluindo red-teaming automatizado (variações adversariais, tentativas de quebrar o sistema) e métricas de RAG específicas (fidelidade, relevância). Diferente do eval set automatizado já implementado (Seção 13), essas ferramentas ajudam a gerar volume e variação de casos, mas ainda dependem de julgamento humano para definir categorias de risco relevantes ao domínio (como a categoria "frases de controle de conversa" descoberta na Seção 5, com "quero sair"). Não adotadas agora por serem um nível de sofisticação maior do que o projeto exige neste estágio — exigem configuração de framework externo e fazem mais sentido como evolução na fase de observabilidade do roadmap de estudos (LangSmith, tracing), quando também se torna possível um segundo nível de evolução: alimentar o eval set com feedback de uso real em produção (perguntas de clientes, sinais implícitos de insatisfação como pedir transferência logo após uma resposta), em vez de depender apenas de casos pensados manualmente antes do deploy.
-- **Eval set mais robusto:** uma primeira versão foi implementada (Seção 13), com 25 casos cobrindo saudação, recuperação de contexto, necessidade de mais informação e grounding, rodando via `tests/run_evals.py` contra as mesmas funções usadas em produção. Duas pendências reais continuam em aberto: (a) ampliar o número de perguntas cobertas, incluindo mais variações de pergunta específica, difusa e fora do domínio, para determinar se a taxa de falso negativo do verificador `gpt-4o-mini` (Seção 8) justifica o custo extra do `gpt-4o` em uso real; (b) um quinto tipo de check validando qual política de negócio foi de fato aplicada na resposta final — gap identificado na Seção 13.7, já que os quatro tipos de check atuais não capturariam o caso da Seção 12 (política errada escolhida) se ele se repetisse hoje, porque uma resposta com a política errada ainda pode estar "fundamentada" e "com contexto encontrado". Planejado antes do few-shot, para que os exemplos escolhidos sejam informados por casos mapeados sistematicamente, não apenas pelos que já surgiram por acaso durante os testes manuais.
+- **Eval set mais robusto:** uma primeira versão foi implementada (Seção 13), com 25 casos cobrindo saudação, recuperação de contexto, necessidade de mais informação e grounding, rodando via `tests/test_eval_set.py` contra as mesmas funções usadas em produção. Duas pendências reais continuam em aberto: (a) ampliar o número de perguntas cobertas, incluindo mais variações de pergunta específica, difusa e fora do domínio, para determinar se a taxa de falso negativo do verificador `gpt-4o-mini` (Seção 8) justifica o custo extra do `gpt-4o` em uso real; (b) um quinto tipo de check validando qual política de negócio foi de fato aplicada na resposta final — gap identificado na Seção 13.7, já que os quatro tipos de check atuais não capturariam o caso da Seção 12 (política errada escolhida) se ele se repetisse hoje, porque uma resposta com a política errada ainda pode estar "fundamentada" e "com contexto encontrado". Planejado antes do few-shot, para que os exemplos escolhidos sejam informados por casos mapeados sistematicamente, não apenas pelos que já surgiram por acaso durante os testes manuais.
 - **Few-shot prompting:** parcialmente endereçado de forma pontual — a seção "Seleção da política aplicável" adicionada ao `system.txt` (Seção 12.6), o prompt de `verificar_grounding` (Seção 12.8) e o prompt de `verificar_informacao_suficiente` (Seção 13.4) já incorporam exemplos concretos e explícitos, cada um adicionado reativamente no momento em que uma falha específica foi identificada. O que ainda não foi feito é uma aplicação sistemática dessa técnica: escolher exemplos representativos a partir do eval set completo (Seção 13), cobrindo classes de ambiguidade ainda não mapeadas, em vez de reagir apenas aos casos que já surgiram durante os testes manuais. Continua dependendo do eval set mais robusto (item acima) para essa etapa sistemática.
 - **Query rewriting (contextual retrieval) e HyDE (Hypothetical Document Embeddings):** `buscar_contexto` recebe apenas a pergunta atual, isolada do histórico da conversa — diferente do LLM de geração, que recebe `messages` completo. Em uma sequência como "meu pedido atrasou" seguida de "e já faz 5 dias", a segunda busca vetorial usaria só a frase vaga, sem termos que o embedding relacione bem ao `politicas.txt`, mesmo a pergunta fazendo sentido no contexto da conversa. Duas técnicas resolvem esse tipo de problema por caminhos diferentes: *query rewriting* reformula a pergunta do usuário (com base no histórico) antes de gerar o embedding de busca; *HyDE* gera uma resposta hipotética para a pergunta e usa o embedding dessa resposta hipotética na busca, em vez do embedding da pergunta em si — a ideia é que uma resposta hipotética tende a ser semanticamente mais próxima de um chunk real (que também é texto de afirmação) do que uma pergunta pura. Ambas exigem uma chamada de LLM adicional antes do retriever. **Decisão consciente de não implementar nenhuma agora:** o objetivo deste projeto é educacional, e o custo extra por mensagem não se justifica na base de conhecimento atual (pequena, ~7 blocos). A decisão entre as duas técnicas — ou nenhuma — depende de um dado que só existe com uma base maior: qual o comportamento real de retrieval multi-turno em um volume de conteúdo mais próximo de produção. Fica planejado reavaliar as duas quando a base de conhecimento for expandida (ver item "base de conhecimento maior via PDF" no roadmap de estudos), testando-as sob a mesma base, em vez de decidir com a base pequena atual. Essa decisão é específica ao estágio de estudos do projeto: em um cenário de produção com volume real de conversas multi-turno, o custo por chamada deixaria de ser o critério dominante frente ao impacto de uma busca ruim na experiência do cliente, e a decisão provavelmente pesaria a favor de implementar uma das duas técnicas.
 > Reavaliado com a base em PDF nas Seções 18 e 19 — conclusão final: nenhuma das duas técnicas encontrou cenário real de uso na arquitetura atual do Max.
@@ -1052,6 +1053,7 @@ Nenhuma das duas rodadas produziu um cenário de produção onde query rewriting
 - Detecção de mensagem fragmentada permanece opcional, adiada — decisão de retomar apenas ao preparar o Max para uma configuração de apresentação, não de estudo.
 - Próxima fase do roadmap de estudos após consolidar Max: banco de dados (SQL/PostgreSQL/vector DBs), antes da fase de memória/tool calling/agents.
 > Atualização: banco de dados implementado e memória/tool calling concluídos na Seção 21; próxima fase real do roadmap passa a ser structured output, MCP e agents.
+> Atualização posterior: `structured output` foi implementado e revertido (Seção 25); MCP foi testado em branch isolada e não será adotado, e agents foi avaliado conceitualmente e também não se encaixa (Seção 26). A próxima fase do roadmap passa a ser deploy.
 ## 20. Few-shot prompting sistemático: mapeamento do eval set, correção de bugs estruturais e estabilização por camada
 
 Com query rewriting e HyDE descartados (Seção 19), o próximo passo do roadmap era few-shot prompting sistemático: em vez de reagir pontualmente a casos que quebravam (como já havia acontecido em `verificar_informacao_suficiente`, na seção "Seleção da política aplicável" de `system.txt`, e na granularidade por tópico da Seção 18), usar o eval set de 28 casos já validado para mapear classes de ambiguidade de forma deliberada e escolher exemplos representativos de cada uma — não só cobrir o próximo caso que aparecesse.
@@ -1112,6 +1114,7 @@ Uma limitação conhecida permanece documentada e deliberadamente não tratada n
 - **Tratamento de idioma (adição futura, não implementada):** a limitação do `"hello"` foi reavaliada à luz da migração para base internacional (Capítulo 6, Portugal/EUA) — a premissa original ("empresa só nacional, perguntas em inglês não deveriam acontecer") não é mais válida. Abordagem escolhida para quando isso for implementado: detecção de idioma como camada determinística e separada no início do pipeline (não instrução ao LLM), com resposta nativa no idioma detectado — não tradução (custo alto, considerado apenas para produção com precificação diferenciada) nem escalonamento automático a humano (dependeria de atendente fluente ou ferramenta de tradução não confiável). Confirmado que a base de conhecimento não precisa ser duplicada: os embeddings da OpenAI são multilíngues por natureza (retrieval cruzado pt/en, a validar empiricamente antes de confiar, no mesmo espírito da calibração de `score_threshold`), e o modelo de geração já lê contexto em português e responde em outro idioma nativamente — o trabalho seria estender os exemplos few-shot já existentes (saudação, `system.txt`) para os idiomas suportados, mais a camada de detecção.
 - Próxima fase do roadmap de estudos após consolidar Max: banco de dados (SQL/PostgreSQL/vector DBs), antes da fase de memória/tool calling/agents.
 > Atualização: banco de dados implementado e memória/tool calling concluídos na Seção 21; próxima fase real do roadmap passa a ser structured output, MCP e agents.
+> Atualização posterior: `structured output` foi implementado e revertido (Seção 25); MCP foi testado em branch isolada e não será adotado, e agents foi avaliado conceitualmente e também não se encaixa (Seção 26). A próxima fase do roadmap passa a ser deploy.
 
 ---
 
@@ -1197,6 +1200,8 @@ O retorno da função é montado inteiramente em Python (loop e f-strings sobre 
 
 **Limitação conhecida, documentada e não resolvida nesta etapa:** o filtro por janela de tempo é, por natureza, um vetor de abuso de custo. Um cliente malicioso poderia gerar um volume alto de mensagens baratas (busca semântica de saudação/saída, não geração completa) para inflar deliberadamente o histórico trazido por `buscar_historico_anterior`, encarecendo chamadas futuras de geração sempre que a ferramenta fosse acionada. A mitigação real (rate limiting, limite de tamanho por mensagem) depende de uma camada de API/deploy ainda não implementada no roadmap — fica registrada como pendência a revisar quando essa camada existir, não resolvida agora.
 
+> Atualização: o teto de 150 mensagens descrito acima foi revisitado na Seção 26.8, que registra como decisão de design futura a troca do critério principal por um orçamento de caracteres (mais recente para mais antigo), mantendo o teto de 150 como segunda proteção. Ainda não implementado na `main`.
+
 ### Identificação de cliente e persistência de mensagens
 
 `identificar_cliente(session)` simula o "login do site" descrito acima: pede um e-mail, busca um `Cliente` existente por esse e-mail ou cria um novo. Uma `Conversa` nova é criada a cada execução do programa, associada a esse cliente. Essa lógica passou a viver dentro de um bloco `with obter_session() as session:` que agora envolve o `while True:` inteiro — mudança estrutural real em relação ao `main.py` anterior, necessário porque a sessão precisa permanecer aberta durante toda a conversa (não só por chamada isolada) para que a persistência de mensagens, abaixo, funcione dentro do mesmo contexto transacional.
@@ -1219,6 +1224,7 @@ Com a integração completa, o fluxo foi testado de ponta a ponta contra o `max_
 - Mitigação do vetor de custo do filtro de 30 dias em `buscar_historico_anterior`, quando a camada de API/deploy existir.
 - Migração real do FAISS para pgvector no Max (adiada desde a etapa de banco vetorial, para evitar retrabalho até este bloco de memória/tool calling estar concluído).
 - Próxima fase do roadmap: structured output, MCP, agents.
+> Atualização: `structured output` revertido (Seção 25); MCP e agents avaliados e não adotados (Seção 26). A próxima fase passa a ser deploy.
 
 ## 22. Transferência inesperada pós-tool-calling: separando duas causas distintas e uma regra de negócio desatualizada
 
@@ -1278,7 +1284,7 @@ Cinco casos, testando a função diretamente via `.invoke({'cliente_id': ...})` 
 
 1. Cliente sem histórico algum → retorna a string de fallback esperada.
 2. Janela de 30 dias → mensagem com 29 dias aparece, mensagem com 31 dias não aparece.
-3. Teto de 150 mensagens → de 155 mensagens inseridas, exatamente as 150 mais recentes retornam; a mais antiga (índice 0) está ausente, a borda do corte (índice 5) está presente, a mais recente (índice 154) está presente. Testar a borda, não só os extremos, confirma que o corte acontece exatamente em 150, não "em algum lugar perto disso".
+3. Teto de 150 mensagens → de 155 mensagens inseridas, exatamente as 150 mais recentes retornam; a mais antiga (índice 0) está ausente, a borda do corte (índice 5) está presente, a mais recente (índice 154) está presente. Testar a borda, não só os extremos, confirma que o corte acontece exatamente em 150, não "em algum lugar perto disso". *(Atualização: a Seção 26.8 planeja substituir este teste por um teste de orçamento de caracteres quando a decisão de design for implementada na `main`.)*
 4. Múltiplas conversas do mesmo cliente → o filtro é por `Conversa.cliente_id` via `join`, não por uma `conversa_id` isolada; mensagens de uma conversa antiga aparecem numa consulta feita a partir de uma conversa nova.
 5. Ordem cronológica → mensagens retornam na ordem em que aconteceram, não na ordem inversa da query (`.desc()` seguido de `.reverse()` no código).
 
@@ -1345,6 +1351,7 @@ O resultado misto da segunda categoria é o dado mais revelador: as duas pergunt
 - Migração real do FAISS para pgvector no Max (adiada desde a etapa de banco vetorial).
 - Merge de `experimento-memoria-tool-calling` na branch principal.
 - Próxima fase do roadmap: structured output, MCP, agents.
+> Atualização: `structured output` revertido (Seção 25); MCP e agents avaliados e não adotados (Seção 26). A próxima fase passa a ser deploy.
 
 ## 24. Memória de sessão: resumo progressivo para conter o crescimento ilimitado de `messages`
 
@@ -1457,4 +1464,127 @@ A base de código descrita aqui (schema, funções de cálculo, integração) é
 - Cobrir persistência de mensagens para os caminhos de saudação, `needs_more_information` e intenção de saída (pendente desde a Seção 21, ainda não relacionado a este item).
 - Migração real do FAISS para pgvector no Max (adiada desde a etapa de banco vetorial).
 - Próxima fase do roadmap: MCP, agents. (`structured output` foi tentado e revertido — Seção 25; retomar a ideia de base, se fizer sentido no futuro, exige primeiro resolver a instabilidade documentada lá.)
+> Atualização: MCP foi testado em branch isolada e não será adotado no Max (Seção 26); agents foi avaliado conceitualmente e também não se encaixa no fluxo central. A próxima fase do roadmap passa a ser deploy.
 
+## 26. MCP: experimento isolado, decisão de não adotar e decisão de design futura para o histórico entre sessões
+
+Com o bloco de memória e tool calling concluído (Seções 21-24) e `structured output` revertido (Seção 25), o próximo item do roadmap era MCP. A pergunta do experimento: **o MCP traria algum ganho para o Max?** O trabalho foi feito na branch `experimento-mcp`, sem tocar no pipeline principal; o que foi decidido a partir dele (decisão de design) está nesta seção, e o código de teste fica na branch como evidência (esta seção descreve o que foi feito lá; os arquivos citados existem apenas nessa branch, não na `main`).
+
+### 26.1 O que o MCP muda e o que não muda
+
+MCP é um protocolo que padroniza como ferramentas (e dados) são expostas por um servidor e descobertas por um cliente. Um ponto importante para este projeto: **ele não muda quem decide chamar a ferramenta**. Essa decisão continua sendo do LLM, exatamente como no tool calling da Seção 21. O que muda é onde a função mora (num servidor separado, em vez de dentro do processo do Max) e como ela é alcançada (descoberta de schema e chamada pelo protocolo, em vez de `tool.invoke()` local).
+
+### 26.2 O que foi testado
+
+- **Encanamento mínimo:** um servidor MCP (`src/mcp_servidor.py`, transporte stdio, SDK `mcp` 2.3.0) com uma tool simulada, e um cliente de teste que sobe o servidor como subprocesso, faz o handshake, descobre a tool pelo nome e a chama. Funcionou; o schema da tool vem do servidor, não do cliente.
+- **Servidor lendo o banco de verdade:** como o decorator `@tool` do LangChain transforma a função num objeto de tool (não numa função Python comum), a consulta de `buscar_historico_anterior` foi separada, na branch `experimento-mcp`, em `consultar_historico()` (função comum, em `src/tools/historico.py`), com a tool do LangChain reduzida a uma casca que a chama. A `main` não recebeu essa refatoração. O servidor MCP passou a chamar a mesma função. Os 5 testes de `test_historico.py` seguiram passando (a refatoração não alterou o comportamento do Max), e o cliente MCP, consultando um cliente com mensagens recentes, devolveu o mesmo formato e a mesma ordem cronológica.
+- **Cenários de falha** (abaixo).
+
+### 26.3 A API do SDK mudou entre a referência e a instalação
+
+O primeiro servidor falhou antes de responder ao handshake. O cliente só mostrava `MCPError: Connection closed`, sem causa. Rodando o servidor sozinho, a causa apareceu: `pip install mcp` instalou a versão 2.x, onde `FastMCP` foi renomeado para `MCPServer` (`from mcp.server.mcpserver import MCPServer`), e o código escrito a partir de material da versão 1.x deixou de importar. Corrigido migrando para `MCPServer` (o decorator `@mcp.tool()` e o `run(transport="stdio")` seguiram iguais).
+
+É o mesmo padrão da Seção 21 (`DB_PASSWORD` ausente gerando um erro de encoding): o erro visível estava numa camada, a causa em outra, e só rodar a peça isolada separou as duas. Também é um risco de manutenção a registrar: o SDK evolui rápido, e material de referência pode estar na versão anterior.
+
+### 26.4 Falhas do servidor: o que o cliente enxerga
+
+Quatro cenários, provocados de propósito (`tests/debug_falha_mcp.py` e `tests/debug_travamento_mcp.py`), com `errlog` do cliente redirecionado para arquivo em `logs/`:
+
+| Cenário | Etapa em que falhou | Tipo do erro | stderr do servidor | Tempo total |
+|---|---|---|---|---|
+| Script do servidor inexistente | `initialize` | `MCPError: Connection closed` | `can't open file ... No such file or directory` | não medido |
+| Executável inexistente | criação do processo | `FileNotFoundError` (`WinError 2`) | vazio (nunca houve processo) | não medido |
+| Servidor sobe e nunca responde (timeout de 5s) | `initialize` | `TimeoutError` | vazio | 7,1s |
+| Handshake e descoberta funcionam, a tool trava (timeout de 5s) | `call_tool` | `TimeoutError` | vazio | 8,0s |
+
+Leituras que a tabela sustenta:
+
+- **O tipo do erro diz em que etapa a falha ocorreu; o stderr diz o porquê, quando existe um processo para escrevê-lo.** `Connection closed` é o mesmo erro para causas diferentes (script ausente, import quebrado), então sozinho ele não é diagnosticável.
+- **O travamento é a falha mais difícil de diagnosticar:** não deixa causa no stderr e o `TimeoutError` chega sem mensagem. Sem timeout, o cliente esperaria indefinidamente.
+- **O tempo total ficou acima do timeout** (2,1s e 3,0s a mais). A hipótese é o tempo de encerrar um processo travado, mas ela não foi verificada.
+- **Com o `errlog` no padrão (stderr do cliente), a mensagem do Python filho não apareceu no terminal em nenhuma ocasião;** redirecionando para arquivo, ela foi capturada de forma confiável. O motivo do sumiço no terminal não foi identificado. A configuração de `logging` do `main.py` foi descartada como causa: ela só vale quando o `main.py` é executado, nenhum dos scripts de teste o importa, e a mensagem em questão é escrita pelo próprio interpretador, não pelo módulo `logging`.
+- **O primeiro teste de travamento terminou em 0,1s com `Connection closed`** nos dois cenários, em vez de esperar o timeout: os servidores falsos estavam salvos com outro nome de arquivo. O sintoma foi idêntico ao de um servidor quebrado por outro motivo, e só o stderr (com `errlog` em arquivo) distingue os dois.
+
+### 26.5 Decisão: MCP não será adotado no Max
+
+O MCP compensa quando há mais de um consumidor das mesmas tools, quando as tools pertencem a outra equipe ou a terceiros, ou quando se quer plugar servidores prontos. No Max há **um único consumidor, um único dono, e tudo roda no mesmo processo**. Adotar MCP aqui acrescentaria:
+
+- um processo a mais e um ponto de falha novo (as quatro falhas acima não existem hoje);
+- latência adicional por chamada, ainda não medida;
+- fricção de integração: o cliente MCP é assíncrono e `processar_pergunta()` é síncrono (identificada na leitura, não exercitada no experimento);
+- a duplicação da descrição da tool em dois lugares (docstring do LangChain e do servidor), a manter em sincronia.
+
+Sem nenhum ganho funcional para o Max. O valor do experimento foi de aprendizado, e ele ficou na branch como evidência reproduzível. Decisão específica à arquitetura atual: um segundo consumidor das mesmas tools (um painel interno, outra aplicação) ou tools de terceiros mudariam essa conta.
+
+### 26.6 Como tratar falhas, caso o MCP seja adotado no futuro
+
+Decisões de design registradas, **não implementadas**:
+
+- **Fail-closed, não fail-open.** `buscar_historico_anterior` só é chamada quando o modelo entendeu que o cliente está retomando um assunto anterior; se a tool falha, existe um contexto que o Max não está vendo, e responder como se fosse um cliente novo seria um custo de confiabilidade maior que uma transferência.
+- **Falha na execução da tool:** uma retentativa curta e, persistindo o erro, transferência para atendente com motivo próprio (`falha_tool`), separado de `grounding_falhou`, para não misturar problema técnico com qualidade de resposta nas métricas.
+- **Falha na descoberta (servidor indisponível ao iniciar):** retentativa e, persistindo, o Max não abre o chat e direciona o cliente ao atendimento humano, tentando a descoberta por sessão (não só uma vez na subida do processo) para que uma queda passageira se recupere sozinha. O custo aceito: uma tool auxiliar fora do ar derrubaria o atendimento inteiro, inclusive perguntas que não usam histórico.
+- **Retentativa não serve para todos os erros** (hipótese, não testada): `FileNotFoundError` e script quebrado são erros de configuração ou de código, e repetir dá o mesmo resultado; o timeout é o candidato natural a retentativa. O tratamento precisa reconhecer os três tipos de erro da tabela acima.
+- **Registrar o stderr do servidor** via `errlog` em arquivo, senão o motivo da queda se perde.
+- **Timeout:** uma tentativa de 5s custou 7 a 8s no relógio, então duas tentativas passam de 15s antes de o cliente ser transferido. O valor de produção não foi calibrado: uma medição no ambiente local (banco na mesma máquina) é só um piso e não serve de base para um ambiente remoto (como o Streamlit Community Cloud). O método a aplicar lá é medir a latência normal, olhar o p95 (não a média) e posicionar o timeout com folga acima dele; partida do processo e chamada comum devem ter timeouts separados.
+
+### 26.7 Agents: decisão conceitual, sem experimento
+
+Agent é um LLM em laço decidindo a ordem dos passos; o Max é um workflow, com a sequência definida em código (saída, saudação, informação suficiente, RAG, geração, grounding). Essa ordem fixa carrega garantias que um agent tornaria probabilísticas: a pergunta é salva antes do LLM e a resposta só depois das duas checagens, e a transferência é decidida por código. Cada volta do laço também é mais uma chamada de LLM, e a Seção 25 já mostrou evidência de que o volume de chamadas por turno se correlaciona com a instabilidade. Um agent só faria sentido como um passo isolado dentro do workflow, para uma tarefa aberta, ou em um projeto separado.
+
+### 26.8 Decisão de design futura: orçamento de caracteres no histórico entre sessões
+
+Status: validado na branch `experimento-mcp` (commit `0438a4a`), **não implementado na `main`**. Fica registrado como decisão de design a implementar depois.
+
+Ao rodar o servidor MCP contra o banco, o teto de 150 mensagens de `buscar_historico_anterior` (Seção 21) foi revisitado. Ele não havia sido uma decisão explícita: a decisão real foi a janela de 30 dias, com um teto apenas como proteção contra volume patológico, e o número 150 entrou na implementação sem ser questionado.
+
+**O custo de 150 mensagens depende da mistura, não da contagem.** Medindo o `max_db` (excluindo os clientes criados por `test_historico.py`):
+
+| Remetente | Mensagens | Média (caracteres) | Maior |
+|---|---|---|---|
+| Max | 88 | 269 | 400 |
+| Cliente | 346 | 30 | 74 |
+
+O Max escreve cerca de 20% das mensagens, mas uma resposta dele tem em média quase 9 vezes o tamanho de uma do cliente. Com essa proporção, ele responde por mais de dois terços do texto de um histórico cheio, e 150 mensagens só de respostas do Max seriam várias vezes mais caras que 150 só do cliente. Ressalva: o banco vem em boa parte de sessões de teste manual, então os números servem como ordem de grandeza, não como calibragem. Além disso, o resultado da tool entra em `estado['messages']` e acompanha os turnos seguintes da sessão até o resumo da Seção 24 atuar, então o custo não se paga uma vez só.
+
+**Decisão:** trocar o critério principal por um **orçamento de caracteres**, somando da mensagem mais recente para a mais antiga e parando quando a próxima não couber. O teto de 150 permanece como segunda proteção. Descartada a ideia de trazer só as mensagens do cliente: sem o que o Max já respondeu, o modelo não sabe o que foi prometido, e a regra de transferência por "insatisfação após duas tentativas" (Seção 22) depende justamente dessas respostas.
+
+```python
+linhas = []
+total_caracteres = 0
+for msg in mensagens_recentes:
+    linha = f"[{msg.enviada_em.strftime('%d/%m %H:%M')}] {msg.remetente}: {msg.conteudo}\n"
+    if linhas and total_caracteres + len(linha) > ORCAMENTO_CARACTERES:
+        break
+    linhas.append(linha)
+    total_caracteres += len(linha)
+```
+
+Pontos de design:
+
+- A mensagem mais recente **sempre entra**, mesmo que sozinha passe do orçamento, para o resultado nunca vir vazio e parecer "sem histórico".
+- O corte pode deixar, no trecho mais antigo, uma resposta do Max sem a pergunta que a originou. Aceito: o que importa para retomar um assunto está nas mensagens recentes.
+- O corte é guloso: aceita linhas inteiras até a próxima não caber, então termina um pouco abaixo do limite.
+
+**Validação na branch:** o teste do teto de 150 (Teste 3 de `test_historico.py`) foi substituído por um teste de orçamento: 100 mensagens longas inseridas, 41 retornadas, 5863 caracteres contra um orçamento de 6000, com a mais recente presente e a mais antiga ausente. Os outros quatro testes seguiram passando. Efeito colateral: o teto de 150 mensagens deixou de ser exercitado por teste, já que dificilmente é o limite que dispara.
+
+**Alterações previstas no código quando for implementado na `main`:**
+
+- `src/tools/historico.py`: duas constantes no topo (`LIMITE_MENSAGENS = 150`, `ORCAMENTO_CARACTERES = 6000`); o `.limit()` passa a ler `LIMITE_MENSAGENS`; o `.reverse()` da lista de mensagens é removido; o laço de montagem do texto é substituído pelo trecho acima, seguido de `linhas.reverse()` e `"".join(linhas)`. A separação em `consultar_historico()` feita na branch não é necessária, porque nasceu do MCP.
+- `tests/test_historico.py`: importar `ORCAMENTO_CARACTERES`; substituir o teste do teto de 150 por um teste de orçamento de caracteres; atualizar a chamada no bloco final.
+
+**Pendências:** o valor de 6000 é **provisório, sem calibragem**; contar tokens reais com `tiktoken` (já instalado no ambiente) e conversas de clientes reais refinaria o número. O orçamento limita o tamanho total do histórico injetado e mitiga parcialmente o vetor de custo documentado na Seção 21, mas não limita o tamanho de uma mensagem individual nem substitui rate limiting na camada de API.
+
+### 26.9 Lições
+
+- Um erro genérico de conexão pode ter várias causas; o tipo do erro localiza a etapa e o stderr, quando capturado, revela a causa.
+- Um valor adotado sem decisão explícita (os 150 mensagens) merece ser revisitado quando o contexto muda; medir o dado real (tamanho médio por remetente) mudou o critério, de contagem para caracteres.
+- Testar uma tecnologia em branch isolada, com resultado e decisão documentados, é um resultado válido mesmo quando a conclusão é não adotar.
+
+### Próximos passos
+
+- Implementar na `main` o orçamento de caracteres do histórico, conforme a decisão de design da Seção 26.8, e calibrar o valor com dados reais.
+- Calibrar os timeouts, caso o MCP venha a ser adotado, com dados reais, na etapa de observabilidade.
+- Limite por mensagem individual: depende da camada de API (Seção 21).
+- Os servidores falsos usados no teste de travamento (`tests/test_servidor_falso_*.py`) dormem por uma hora ao serem executados; quando entrar a etapa de testes automatizados (`pytest`), precisam ser excluídos da descoberta de testes.
+- Os testes de `test_historico.py` deixam clientes de teste acumulando no `max_db` a cada execução; vale prever uma limpeza ao separar os ambientes de teste e produção.
+- Próxima fase do roadmap: deploy.
