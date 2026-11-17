@@ -7,7 +7,7 @@
 
 Projeto desenvolvido para estudo de aplicações de IA utilizando Large Language Models (LLMs), Prompt Engineering e Retrieval-Augmented Generation (RAG).
 
-Assistente de atendimento ao cliente que responde com base nas políticas reais da empresa, transfere automaticamente para atendentes humanos quando necessário e mantém contexto durante toda a conversa.
+Assistente de atendimento ao cliente que responde com base nas políticas reais da empresa, transfere automaticamente para atendentes humanos quando necessário, mantém contexto durante a conversa e consulta o histórico recente do cliente quando ele retoma um assunto de uma sessão anterior.
 
 > Além do código-fonte, este projeto documenta os experimentos realizados durante o desenvolvimento — incluindo falhas, hipóteses testadas e decisões arquiteturais recalibradas com dado real. Veja [EXPERIMENTS.md](./EXPERIMENTS.md).
 
@@ -73,7 +73,10 @@ flowchart TD
 
     Inicializacao --> mainpy
     Usuario --> mainpy
-    mainpy --> Saudacao{É saudação?}
+    mainpy --> Saida{Intenção de saída?}
+
+    Saida -->|Sim| Encerra[Encerra a conversa]
+    Saida -->|Não| Saudacao{É saudação?}
 
     Saudacao -->|Sim| RespostaSaudacao[Resposta de saudação]
     RespostaSaudacao --> Usuario
@@ -91,6 +94,8 @@ flowchart TD
     PrimeiraTentativa -->|Não| Transferencia[Transferência para atendente]
 
     ContextoEncontrado -->|Sim| LLM[LLM]
+    LLM -.->|cliente retoma assunto anterior| Historico[Tool: histórico do cliente]
+    Historico -.-> BancoDados[(PostgreSQL)]
     LLM --> MarcadorTransferencia{Contém marcador de transferência?}
     MarcadorTransferencia -->|Sim| Transferencia
     MarcadorTransferencia -->|Não| verificacaopy[verificacao_llm.py]
@@ -99,6 +104,10 @@ flowchart TD
     RespostaFundamentada -->|Não| Transferencia
     RespostaFundamentada -->|Sim| RespostaExibida[Resposta exibida ao usuário]
     RespostaExibida --> Usuario
+
+    RespostaExibida --> Grava[Grava pergunta e resposta]
+    Transferencia --> Grava
+    Grava --> BancoDados
 ```
 
 ## Como funciona
@@ -115,7 +124,11 @@ Quando contexto relevante é encontrado, ele é inserido no prompt enviado ao GP
 
 O índice vetorial e os documentos-pai são persistidos em disco e só são recalculados quando a base de conhecimento (`politicas_xyz.pdf`) é alterada, evitando reprocessamento desnecessário a cada execução.
 
-Um eval set automatizado (`tests/`), com 28 casos, roda um conjunto de perguntas de teste contra o pipeline completo — saudação, recuperação de contexto, necessidade de informação adicional e grounding — usado para validar que mudanças no prompt, no chunking ou nos parâmetros de retrieval não introduzem regressões em comportamentos já calibrados. Além de testar cada etapa isoladamente, dois tipos de check validam propriedades do fluxo real de decisão: um confirma em qual etapa exata do pipeline uma pergunta é interceptada (garantindo, por exemplo, que uma pergunta ambígua entre nacional e internacional é barrada antes de chegar ao retriever, e não só que a função isolada retorna o valor certo); outro confirma qual política de negócio foi de fato aplicada na resposta final, não apenas que a resposta está "fundamentada" em algum contexto — uma resposta pode citar a política errada entre duas candidatas e ainda passar numa checagem de grounding ingênua.
+Durante a sessão, o histórico é mantido em memória e resumido automaticamente quando cresce, para que o contexto da conversa não aumente sem limite. As interações que chegam à geração ou à transferência são gravadas em PostgreSQL (tabelas de clientes, conversas e mensagens, via SQLAlchemy).
+
+Quando o cliente retoma um assunto de uma conversa anterior ("e como ficou meu problema?"), o modelo aciona, via tool calling, a tool `buscar_historico_anterior`. Ela lê as mensagens do cliente nos últimos 30 dias, de todas as conversas, e as devolve em ordem cronológica. O limite principal é um orçamento de caracteres (6000, valor provisório), somado da mensagem mais recente para a mais antiga: a mais recente sempre entra, e o corte acontece na primeira que não couber. Um teto de 150 mensagens funciona como segunda proteção. O orçamento foi escolhido porque, nos dados medidos, as respostas do Max são muito mais longas que as mensagens do cliente (média de 269 contra 30 caracteres), então contar mensagens escondia o custo real.
+
+Um eval set automatizado (`tests/`), com 30 casos, roda um conjunto de perguntas de teste contra o pipeline completo — saudação, recuperação de contexto, necessidade de informação adicional e grounding — usado para validar que mudanças no prompt, no chunking ou nos parâmetros de retrieval não introduzem regressões em comportamentos já calibrados. Além de testar cada etapa isoladamente, dois tipos de check validam propriedades do fluxo real de decisão: um confirma em qual etapa exata do pipeline uma pergunta é interceptada (garantindo, por exemplo, que uma pergunta ambígua entre nacional e internacional é barrada antes de chegar ao retriever, e não só que a função isolada retorna o valor certo); outro confirma qual política de negócio foi de fato aplicada na resposta final, não apenas que a resposta está "fundamentada" em algum contexto — uma resposta pode citar a política errada entre duas candidatas e ainda passar numa checagem de grounding ingênua. O eval set não exercita tool calling: a tool de histórico e a persistência têm testes próprios (`test_historico.py` e `test_persistencia.py`).
 
 ## Funcionalidades
 
@@ -129,18 +142,21 @@ Um eval set automatizado (`tests/`), com 28 casos, roda um conjunto de perguntas
 - Fallback de reformulação antes de transferir, para perguntas fora do escopo
 - Transferência automática para atendente humano quando necessário
 - Persistência do índice vetorial e dos documentos-pai em disco, recalculados apenas quando a base muda
-- Eval set automatizado (28 casos) para validar regressões após mudanças de prompt, chunking ou verificação — incluindo checagem da ordem real de interceptação do pipeline e da política de negócio de fato aplicada na resposta
+- Eval set automatizado (30 casos) para validar regressões após mudanças de prompt, chunking ou verificação — incluindo checagem da ordem real de interceptação do pipeline e da política de negócio de fato aplicada na resposta
 - Streaming de respostas em tempo real
-- Histórico de conversa durante a sessão
+- Memória de sessão com resumo automático do histórico quando a conversa cresce
+- Persistência de conversas e mensagens em PostgreSQL
+- Consulta ao histórico do cliente entre sessões via tool calling, com janela de 30 dias e orçamento de caracteres
 - Log técnico separado da interface do usuário
 
 ## Tecnologias
 
 - Python 3.10+
 - LangChain (core, text-splitters, community, openai)
-- OpenAI API (GPT-4o Mini)
+- OpenAI API (GPT-4o Mini), incluindo tool calling
 - OpenAI Embeddings
 - FAISS (banco de vetores)
+- PostgreSQL e SQLAlchemy (persistência de clientes, conversas e mensagens)
 - pdfplumber (extração estrutural de PDF)
 - python-dotenv
 
@@ -158,14 +174,21 @@ max-assistente/
 ├── prompts/
 │   └── system.txt              # Personalidade e regras do assistente
 ├── src/
-│   ├── main.py                  # Orquestração e loop de conversa
+│   ├── main.py                  # Loop de conversa
+│   ├── processamento.py         # Pipeline de uma pergunta (processar_pergunta)
 │   ├── inicializacao.py         # Carregamento de prompt, base de conhecimento e retriever pai-filho
 │   ├── extracao_pdf.py          # Extração estrutural do PDF e chunking pai-filho
 │   ├── busca_semantica.py       # Busca de contexto e detecção de saudação por embedding
-│   └── verificacao_llm.py       # Verificação de informação suficiente e de grounding
+│   ├── verificacao_llm.py       # Verificação de informação suficiente e de grounding
+│   ├── memoria_sessao.py        # Memória da sessão e resumo automático
+│   ├── db/                      # Modelos e sessão do banco (SQLAlchemy)
+│   └── tools/
+│       └── historico.py         # Tool de histórico entre sessões (buscar_historico_anterior)
 ├── tests/
 │   ├── eval_set.json             # Casos de teste do eval set automatizado
 │   ├── test_eval_set.py          # Script de execução do eval set contra o pipeline completo
+│   ├── test_historico.py         # Testes da tool de histórico (janela, orçamento, ordem)
+│   ├── test_persistencia.py      # Testes da gravação de conversas e mensagens
 │   └── debug_*.py                # Scripts de diagnóstico (extração, scores, calibração, estabilidade)
 ├── .env.example                 # Exemplo de variáveis de ambiente
 ├── .gitignore
@@ -219,8 +242,10 @@ python tests/test_eval_set.py
 - Detecção de alucinação e verificação de grounding como camada de segurança
 - Trade-offs de custo vs. confiabilidade na escolha de modelo e arquitetura
 - Persistência de índice vetorial e separação de logs técnicos
+- Memória em duas camadas: resumo automático dentro da sessão e consulta ao histórico entre sessões via tool calling, com o limite de contexto definido por orçamento de caracteres a partir de dado medido, e não por contagem de mensagens
+- Persistência relacional (PostgreSQL e SQLAlchemy) como base da memória entre sessões
 - Eval set automatizado para prevenir regressões entre camadas de retrieval, prompt e verificação, incluindo checagem da ordem real de execução do pipeline e da política de negócio de fato aplicada, não apenas de cada função isolada
-- Decisões de escopo fundamentadas em evidência empírica — incluindo o descarte, com teste real e não apenas leitura teórica, de técnicas (query rewriting, HyDE) que pareciam fazer sentido na teoria mas não encontraram cenário de aplicação real na arquitetura atual do sistema
+- Decisões de escopo fundamentadas em evidência empírica — incluindo o descarte, com teste real e não apenas leitura teórica, de técnicas que pareciam fazer sentido na teoria mas não encontraram cenário de aplicação real na arquitetura atual (query rewriting, HyDE, structured output e MCP), e a análise de por que agents não se encaixam em um workflow determinístico como o do Max
 - Organização de projeto em módulos por responsabilidade
 
 Cada uma dessas decisões foi testada empiricamente, não apenas assumida — incluindo casos em que a primeira solução falhou e precisou ser recalibrada. Para o histórico completo de testes, hipóteses e limitações conhecidas, veja [EXPERIMENTS.md](./EXPERIMENTS.md).
@@ -230,12 +255,15 @@ Cada uma dessas decisões foi testada empiricamente, não apenas assumida — in
 - Ampliar o eval set com mais variações de pergunta (específica, difusa, fora do domínio) — crescimento orgânico conforme novos casos surgirem em teste, não um lote isolado
 - Few-shot prompting sistemático nos prompts de geração e verificação, escolhendo exemplos representativos a partir do eval set completo
 - Detecção de mensagens fragmentadas ou incompletas (cliente digitando em várias mensagens curtas em sequência) — adiada por ora; não builda em cima de nenhuma outra etapa do pipeline, então fica reservada para quando o projeto migrar de configuração de estudo para uma configuração voltada a apresentação
-- Banco de dados (SQL/PostgreSQL, possivelmente um vetorial dedicado) para persistência e memória de conversa entre sessões
-- Interface Web com Streamlit
-- API REST utilizando FastAPI
+- Persistência das interações que hoje não são gravadas (saudação, pedido de mais informação e intenção de saída), para o histórico entre sessões ficar completo
+- Calibração do orçamento de histórico em tokens (tiktoken) com dados reais, no lugar do valor provisório de 6000 caracteres
+- Migração do índice vetorial de FAISS para pgvector — adiada; a decisão depende do ambiente de hospedagem e exigiria recalibrar o `score_threshold` e rodar o eval set novamente
+- Interface Web com Streamlit, com hospedagem gratuita no Streamlit Community Cloud
+- API REST utilizando FastAPI — a decisão entre uma API separada ou tudo no Streamlit será tomada na abertura da fase de deploy
 - Docker para facilitar o deploy
+- Observabilidade e tracing (LangSmith)
 
-> Query rewriting e HyDE foram avaliados e **descartados** como funcionalidades de produção, não permanecem como melhoria futura — o código do experimento (`reescrever_query()`, script de debug) fica preservado em uma branch separada como evidência reproduzível, sem integração no fluxo principal. Motivo e processo de teste completos nas Seções 18 e 19 do [EXPERIMENTS.md](./EXPERIMENTS.md).
+> Query rewriting e HyDE (Seções 18 e 19 do [EXPERIMENTS.md](./EXPERIMENTS.md)) e MCP (Seção 26) foram avaliados com teste real e **descartados** como funcionalidades de produção, não permanecem como melhoria futura — o código desses experimentos fica preservado em branches separadas como evidência reproduzível, sem integração no fluxo principal. Structured output foi implementado e revertido (Seção 25), e agents não se encaixam em um workflow determinístico como o do Max (Seção 26).
 
 ## Observações
 
